@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+wheels/
+
+# uv
+.venv/
+.uv/
+uv.lock
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Model store (trained weights — large binary files)
+model_store/
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Logs
+*.log
+logs/
+
+# IDEs
+.vscode/
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+.docker/
+
+# Alembic
+alembic/versions/*.pyc
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
