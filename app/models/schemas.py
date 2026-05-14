@@ -31,11 +31,11 @@ class TrainingStatus(str, Enum):
 # ── Hyperparameters ───────────────────────────────────────────────────────────
 
 class HyperParams(BaseModel):
-    alpha_1: float = Field(0.5,  ge=0.0, le=1.0, description="Bloomberg ESG weight (Agents A, C)")
-    alpha_2: float = Field(0.5,  ge=0.0, le=1.0, description="LESG ESG weight (Agents A, C)")
-    alpha_3: float = Field(0.01, ge=0.0, le=0.1, description="Financial agent ESG bias (≈0)")
-    beta:    float = Field(0.3,  ge=0.0, le=1.0, description="Shared ambiguity penalty (Portfolio C)")
-    lam:     float = Field(0.4,  ge=0.0, le=1.0, description="Signed disagreement sensitivity (Portfolio B)")
+    alpha_1: float = Field(default=0.5,  ge=0.0, le=1.0, description="Bloomberg ESG weight (Agents A, C)")
+    alpha_2: float = Field(default=0.5,  ge=0.0, le=1.0, description="LESG ESG weight (Agents A, C)")
+    alpha_3: float = Field(default=0.01, ge=0.0, le=0.1, description="Financial agent ESG bias (≈0)")
+    beta:    float = Field(default=0.3,  ge=0.0, le=1.0, description="Shared ambiguity penalty (Portfolio C)")
+    lam:     float = Field(default=0.4,  ge=0.0, le=1.0, description="Signed disagreement sensitivity (Portfolio B)")
 
 
 # ── Portfolio generation ──────────────────────────────────────────────────────

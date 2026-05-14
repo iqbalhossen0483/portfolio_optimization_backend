@@ -18,6 +18,7 @@ from app.data.pipeline import DataPipeline
 from app.data.sources.market import MarketDataSource
 from app.data.sources.esg import ESGDataSource
 from app.config import get_settings
+import redis.asyncio as aioredis
 
 log = structlog.get_logger(__name__)
 cfg = get_settings()
@@ -28,7 +29,7 @@ class PortfolioService:
     def __init__(
         self,
         db: AsyncSession,
-        redis_client=None,
+        redis_client: aioredis.Redis | None=None,
         market_source: MarketDataSource | None = None,
         esg_source: ESGDataSource | None = None,
     ) -> None:

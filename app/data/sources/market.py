@@ -43,7 +43,7 @@ class MarketDataSource:
         results = await asyncio.gather(*tasks, return_exceptions=True)
         out: dict[str, pd.DataFrame] = {}
         for isin, result in zip(isins, results):
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
                 log.error("Failed to fetch OHLCV", isin=isin, error=str(result))
                 out[isin] = pd.DataFrame()
             else:

@@ -2,7 +2,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.api.deps import get_portfolio_service
-from app.models.schemas import PortfolioGenerateRequest, PortfolioGenerateResponse
+from app.models.schemas import PortfolioGenerateRequest
 from app.services.portfolio_service import PortfolioService
 
 router = APIRouter(prefix="/portfolio", tags=["portfolio"])

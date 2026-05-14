@@ -124,6 +124,7 @@ class DataPipeline:
             normalizer = DataNormalizer(n)
             normed = normalizer.fit_transform(market_data, bloomberg_raw, lesg_raw)
         else:
+            assert normalizer is not None
             normed = normalizer.transform(market_data, bloomberg_raw, lesg_raw)
 
         # ── 6. Assemble per-timestep state vectors (10N each) ─────────────────

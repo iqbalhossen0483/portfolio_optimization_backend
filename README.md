@@ -366,37 +366,54 @@ tests/test_environment.py  ......   6 passed
 ```
 madrl_portfolio/
 ├── app/
-│   ├── main.py                     # FastAPI app factory + lifespan
-│   ├── config.py                   # Pydantic Settings (env-driven)
-│   ├── agents/
+│   ├── main.py                     # FastAPI app factory + startup/shutdown
+│   ├── config.py                   # Pydantic Settings — All env-var settings (DB URL, Redis, etc.)
+│   │
+│   ├── api/                        # HTTP layer — routing, request/response only
+│   │   ├── deps.py                 # Shared dependencies (DB session, Redis, auth)
+│   │   └── routes/
+│   │       ├── portfolio.py        # POST /portfolio/generate, GET /portfolio/{id}/comparison
+│   │       ├── training.py         # POST /training/start, GET /training/{id}/status
+│   │       ├── data.py             # POST /data/ingest, GET /data/assets
+│   │       └── websocket.py        # WS /ws/training/{id}, WS /ws/portfolio/{id}
+│   │
+│   ├── services/                   # Business logic layer — orchestrates agents + data
+│   │   ├── portfolio_service.py    # Portfolio generation business logic
+│   │   └── training_service.py     # Training job lifecycle management
+│   │
+│   ├── agents/                     # Multi-agent decision-making (Google ADK)
+│   │   ├── base.py                 # Abstract agent interface
 │   │   ├── bloomberg_agent.py      # ADK agent — Bloomberg ESG perspective
 │   │   ├── lesg_agent.py           # ADK agent — LESG ESG perspective
 │   │   ├── financial_agent.py      # ADK agent — pure financial return
-│   │   └── portfolio_orchestrator.py  # Top-level ADK orchestrator
-│   ├── rl/
-│   │   ├── networks.py             # ActorNetwork, CriticNetwork (PyTorch)
+│   │   └── portfolio_orchestrator.py  # Coordinates all three agents together
+│   │
+│   ├── rl/                         # Core reinforcement learning engine (PyTorch)
 │   │   ├── masac.py                # MASAC algorithm (3 agents, 6 critics)
-│   │   ├── replay_buffer.py        # 1M-capacity uniform replay buffer
+│   │   ├── networks.py             # ActorNetwork, CriticNetwork (PyTorch)
 │   │   ├── environment.py          # MarketEnvironment (all models + topologies)
+│   │   ├── replay_buffer.py        # 1M-capacity uniform replay buffer
 │   │   └── trainer.py              # Training loop + Redis streaming
-│   ├── data/
+│   │
+│   ├── data/                       # Data pipeline — fetch, preprocess, feature engineering
 │   │   ├── pipeline.py             # End-to-end data orchestration
-│   │   ├── sources/market.py       # OHLCV fetcher (yfinance / Bloomberg)
-│   │   ├── sources/esg.py          # ESG score fetcher (Bloomberg / LESG / stub)
-│   │   ├── preprocessing/normalizer.py   # Cross-sectional + time-series normalization
-│   │   └── preprocessing/indicators.py  # RSI(14), MACD histogram(12/26/9)
-│   ├── api/routes/
-│   │   ├── portfolio.py            # POST /portfolio/generate
-│   │   ├── training.py             # POST /training/start, GET /training/{id}/status
-│   │   ├── data.py                 # POST /data/ingest, GET /data/assets
-│   │   └── websocket.py            # WS /ws/training/{id}, WS /ws/portfolio/{id}
-│   ├── services/
-│   │   ├── portfolio_service.py    # Portfolio generation business logic
-│   │   └── training_service.py     # Training job management
-│   ├── models/
-│   │   ├── domain.py               # SQLAlchemy ORM models
+│   │   ├── sources/
+│   │   │   ├── market.py           # OHLCV fetcher (yfinance / Bloomberg)
+│   │   │   └── esg.py              # ESG score fetcher (Bloomberg / LESG / stub)
+│   │   └── preprocessing/
+│   │       ├── normalizer.py       # Cross-sectional + time-series normalization
+│   │       └── indicators.py       # RSI(14), MACD histogram(12/26/9)
+│   │
+│   ├── models/                     # Data contracts — no logic allowed here
+│   │   ├── domain.py               # SQLAlchemy ORM models (DB tables)
 │   │   └── schemas.py              # Pydantic request/response schemas
-│   └── workers/tasks.py            # Celery training tasks
+│   │
+│   ├── core/                       # Infrastructure — DB connection pool
+│   │   └── database.py             # Async engine, session factory, create_tables
+│   │
+│   └── workers/                    # Background async jobs
+│       └── tasks.py                # Celery training tasks
+│
 ├── tests/
 │   ├── test_normalizer.py
 │   ├── test_masac.py
@@ -406,6 +423,33 @@ madrl_portfolio/
 ├── Dockerfile
 ├── requirements.txt
 └── .env.example
+```
+
+### Layer Responsibilities
+
+Each layer has a strict boundary — it owns its concerns and delegates everything else to the layer below it.
+
+| Layer | Folder | Owns | Does NOT own |
+|---|---|---|---|
+| **HTTP** | `api/routes/` | URL paths, HTTP status codes, serialization | Business logic |
+| **Business Logic** | `services/` | Orchestration, business rules | HTTP details, raw DB queries |
+| **Agent Decisions** | `agents/` | Per-agent ESG/financial decision-making | Training loop, HTTP concerns |
+| **RL Engine** | `rl/` | MASAC algorithm, neural nets, RL environment | Agent coordination |
+| **Data Pipeline** | `data/` | Fetching + preprocessing raw market/ESG data | Portfolio decisions |
+| **Data Contracts** | `models/` | DB table shapes + API schema validation | Logic of any kind |
+| **Infrastructure** | `core/` | DB connection pool, session management | Application logic |
+| **Background Jobs** | `workers/` | Long-running async Celery tasks | Synchronous request handling |
+
+### Data Flow
+
+```
+HTTP Request
+    └── api/routes/            ← validates input, calls service
+            └── services/      ← applies business rules, coordinates layers
+                    ├── agents/         ← each agent makes its ESG/financial decision
+                    │       └── rl/     ← MASAC algorithm + neural nets run here
+                    ├── data/           ← fetches + preprocesses market & ESG data
+                    └── models/domain   ← reads/writes DB via core/database
 ```
 
 ---

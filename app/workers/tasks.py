@@ -16,6 +16,7 @@ if _root not in sys.path:
 
 import structlog
 from celery import Celery
+from celery.app.task import Task as CeleryTask
 from celery.signals import task_failure, task_success
 
 from app.config import get_settings
@@ -43,6 +44,8 @@ def run_training_job(self, job_id: str, config: dict) -> dict:
     return asyncio.get_event_loop().run_until_complete(
         _async_run_training(job_id, config)
     )
+
+run_training_job: CeleryTask
 
 
 async def _async_run_training(job_id: str, config: dict) -> dict:
