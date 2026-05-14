@@ -1,0 +1,10 @@
+.venv
+__pycache__
+*.pyc
+*.pyo
+.git
+.env
+.env.docker
+tests/
+*.md
+model_store/

@@ -91,14 +91,14 @@ Services are split between `uv run` (Python processes) and Docker (infrastructur
 
 ### Service map
 
-| Service | How to run | URL |
-|---|---|---|
-| **FastAPI** | `uv run` | http://localhost:8000 |
-| **Celery worker** | `uv run` | — |
-| **Flower** | `uv run` | http://localhost:5555 |
-| **PostgreSQL** | Docker | localhost:5432 |
-| **Redis** | Docker | localhost:6379 |
-| **Prometheus** | Docker | http://localhost:9090 |
+| Service           | How to run | URL                   |
+| ----------------- | ---------- | --------------------- |
+| **FastAPI**       | `uv run`   | http://localhost:8000 |
+| **Celery worker** | `uv run`   | —                     |
+| **Flower**        | `uv run`   | http://localhost:5555 |
+| **PostgreSQL**    | Docker     | localhost:5432        |
+| **Redis**         | Docker     | localhost:6379        |
+| **Prometheus**    | Docker     | http://localhost:9090 |
 
 > Prometheus runs in Docker but scrapes the `uv`-hosted API on your machine via
 > `host.docker.internal:8000` — no special config needed.
@@ -186,12 +186,12 @@ uv run celery -A celery_app flower --port=5555
 
 ### All services at a glance
 
-| Terminal | Command | Opens |
-|---|---|---|
-| 1 | `uv run uvicorn app.main:app --reload --port 8000` | API + Swagger |
-| 2 | `uv run celery -A celery_app worker --loglevel=info --pool=solo` | Worker |
-| 3 | `uv run celery -A celery_app flower --port=5555` | Flower UI |
-| Docker | `docker compose up postgres redis prometheus -d` | DB + Cache + Metrics |
+| Terminal | Command                                                          | Opens                |
+| -------- | ---------------------------------------------------------------- | -------------------- |
+| 1        | `uv run uvicorn app.main:app --reload --port 8000`               | API + Swagger        |
+| 2        | `uv run celery -A celery_app worker --loglevel=info --pool=solo` | Worker               |
+| 3        | `uv run celery -A celery_app flower --port=5555`                 | Flower UI            |
+| Docker   | `docker compose up postgres redis prometheus -d`                 | DB + Cache + Metrics |
 
 ---
 
