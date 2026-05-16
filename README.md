@@ -72,7 +72,6 @@ This starts:
 | **ReDoc**                   | http://localhost:8000/redoc |
 | **Flower** (Celery monitor) | http://localhost:5555       |
 | **Prometheus**              | http://localhost:9090       |
-| PostgreSQL                  | localhost:5432              |
 | Redis                       | localhost:6379              |
 
 ### 3. Verify the API is running
@@ -96,7 +95,6 @@ Services are split between `uv run` (Python processes) and Docker (infrastructur
 | **FastAPI**       | `uv run`   | http://localhost:8000 |
 | **Celery worker** | `uv run`   | —                     |
 | **Flower**        | `uv run`   | http://localhost:5555 |
-| **PostgreSQL**    | Docker     | localhost:5432        |
 | **Redis**         | Docker     | localhost:6379        |
 | **Prometheus**    | Docker     | http://localhost:9090 |
 
@@ -146,7 +144,7 @@ MODEL_STORE_PATH=./model_store
 ### 4. Start infrastructure services (Docker)
 
 ```bash
-docker compose up postgres redis prometheus -d
+docker compose up -d
 ```
 
 This starts PostgreSQL, Redis, and Prometheus. Prometheus will immediately begin
@@ -195,6 +193,40 @@ uv run celery -A celery_app flower --port=5555
 
 ---
 
+## Database Migrations
+
+The project uses **Alembic** for schema migrations. Run these after any change to `app/models/domain.py` or on first setup.
+
+### First-time setup
+
+```bash
+# Activate the virtual environment first
+.venv\Scripts\Activate.ps1          # Windows
+source .venv/bin/activate           # macOS / Linux
+
+# Generate a migration from the current ORM models
+alembic revision --autogenerate -m "add computed features columns and normalizer params table"
+
+# Apply the migration to the database
+alembic upgrade head
+```
+
+### Common Alembic commands
+
+| Command                                            | What it does                                         |
+| -------------------------------------------------- | ---------------------------------------------------- |
+| `alembic upgrade head`                             | Apply all pending migrations (run after every pull)  |
+| `alembic revision --autogenerate -m "description"` | Generate a new migration from ORM model changes      |
+| `alembic downgrade -1`                             | Roll back the last migration                         |
+| `alembic downgrade base`                           | Roll back all migrations (empty schema)              |
+| `alembic current`                                  | Show which migration revision the DB is currently at |
+| `alembic history`                                  | List all migration revisions                         |
+
+> **Note:** Alembic reads the database URL from `app/config.py` (via `POSTGRES_DSN` in `.env`).
+> Make sure PostgreSQL is running before executing any migration command.
+
+---
+
 ## Running the System
 
 ### Step 1 — Ingest market and ESG data
@@ -216,27 +248,47 @@ curl -X POST http://localhost:8000/api/v1/data/ingest \
 
 ### Step 2 — Train MASAC agents
 
+Upload one or more `.xlsx` files in `Stock_ESG_Dataset` format together with the training configuration as multipart form fields.
+Stages 1–3 (parse → DB upsert → ESG normalization → normalizer fit) run synchronously and return a `job_id` immediately.
+Stage 4 (MASAC training) is enqueued to Celery and runs in the background.
+
 ```bash
 curl -X POST http://localhost:8000/api/v1/training/start \
-  -H "Content-Type: application/json" \
-  -d '{
-    "portfolio_model": "C",
-    "topology": "all",
-    "assets": ["AAPL", "XOM", "JNJ", "HSBA.L"],
-    "train_start": "2018-01-01",
-    "train_end": "2022-12-31",
-    "val_start": "2023-01-01",
-    "val_end": "2023-12-31",
-    "hyperparams": {
-      "alpha_1": 0.5,
-      "alpha_2": 0.5,
-      "alpha_3": 0.01,
-      "beta": 0.3,
-      "lam": 0.4
-    }
-  }'
-# Returns: {"job_id": "uuid", "status": "queued"}
+  -F "files=@/path/to/stock_esg_dataset.xlsx" \
+  -F "portfolio_model=C" \
+  -F "topology=all" \
+  -F "train_start=2018-01-01" \
+  -F "train_end=2022-12-31" \
+  -F "val_start=2023-01-01" \
+  -F "val_end=2023-12-31" \
+  -F 'hyperparams_json={"alpha_1":0.5,"alpha_2":0.5,"alpha_3":0.01,"beta":0.3,"lam":0.4}'
+# Returns: {"job_id": "uuid", "status": "queued", "message": "Stages 1-3 complete. MASAC training queued."}
 ```
+
+**Upload multiple files** (e.g. different date ranges or asset sets — deduplicated automatically):
+
+```bash
+curl -X POST http://localhost:8000/api/v1/training/start \
+  -F "files=@dataset_2018_2020.xlsx" \
+  -F "files=@dataset_2021_2024.xlsx" \
+  -F "portfolio_model=C" \
+  -F "topology=all"
+  # train/val dates auto-derived from file contents at 80/20 split if omitted
+```
+
+**XLSX format** (sheet name must be `Stock_ESG_Dataset`):
+
+| Column                      | Type   | Notes                                               |
+| --------------------------- | ------ | --------------------------------------------------- |
+| `Date`                      | date   | Trading date                                        |
+| `ISIN`                      | string | Asset identifier                                    |
+| `Company name`              | string | —                                                   |
+| `Sector`                    | string | —                                                   |
+| `Open / High / Low / Close` | float  | Raw OHLCV                                           |
+| `Volume`                    | string | Accepts `10.5M`, `2.3K`, `1B`, `1T` or plain number |
+| `RSI`                       | float  | Pre-computed — used as-is, not recomputed           |
+| `Bloom. ESG (0-100)`        | float  | Bloomberg ESG score                                 |
+| `LESG ESG (0-10)`           | float  | LESG ESG score                                      |
 
 **Portfolio models:**
 
@@ -398,8 +450,10 @@ madrl_portfolio/
 │   ├── data/                       # Data pipeline — fetch, preprocess, feature engineering
 │   │   ├── pipeline.py             # End-to-end data orchestration
 │   │   ├── sources/
-│   │   │   ├── market.py           # OHLCV fetcher (yfinance / Bloomberg)
-│   │   │   └── esg.py              # ESG score fetcher (Bloomberg / LESG / stub)
+│   │   │   ├── xlsx.py             # XLSX parser — Stage 1 ingestion (return_pct, MACD from Close)
+│   │   │   ├── database.py         # DB-backed sources — Stage 4 reads (pre-computed features)
+│   │   │   ├── market.py           # OHLCV fetcher (yfinance / Bloomberg) — legacy path
+│   │   │   └── esg.py              # ESG score fetcher (Bloomberg / LESG / stub) — legacy path
 │   │   └── preprocessing/
 │   │       ├── normalizer.py       # Cross-sectional + time-series normalization
 │   │       └── indicators.py       # RSI(14), MACD histogram(12/26/9)
@@ -414,10 +468,14 @@ madrl_portfolio/
 │   └── workers/                    # Background async jobs
 │       └── tasks.py                # Celery training tasks
 │
+├── alembic/                        # Database migration scripts
+│   ├── env.py                      # Alembic async env (reads POSTGRES_DSN from settings)
+│   └── versions/                   # Auto-generated migration files
 ├── tests/
 │   ├── test_normalizer.py
 │   ├── test_masac.py
 │   └── test_environment.py
+├── alembic.ini                     # Alembic configuration
 ├── ARCHITECTURE.md                 # Full system design with diagrams
 ├── docker-compose.yml
 ├── Dockerfile
@@ -429,16 +487,16 @@ madrl_portfolio/
 
 Each layer has a strict boundary — it owns its concerns and delegates everything else to the layer below it.
 
-| Layer | Folder | Owns | Does NOT own |
-|---|---|---|---|
-| **HTTP** | `api/routes/` | URL paths, HTTP status codes, serialization | Business logic |
-| **Business Logic** | `services/` | Orchestration, business rules | HTTP details, raw DB queries |
-| **Agent Decisions** | `agents/` | Per-agent ESG/financial decision-making | Training loop, HTTP concerns |
-| **RL Engine** | `rl/` | MASAC algorithm, neural nets, RL environment | Agent coordination |
-| **Data Pipeline** | `data/` | Fetching + preprocessing raw market/ESG data | Portfolio decisions |
-| **Data Contracts** | `models/` | DB table shapes + API schema validation | Logic of any kind |
-| **Infrastructure** | `core/` | DB connection pool, session management | Application logic |
-| **Background Jobs** | `workers/` | Long-running async Celery tasks | Synchronous request handling |
+| Layer               | Folder        | Owns                                         | Does NOT own                 |
+| ------------------- | ------------- | -------------------------------------------- | ---------------------------- |
+| **HTTP**            | `api/routes/` | URL paths, HTTP status codes, serialization  | Business logic               |
+| **Business Logic**  | `services/`   | Orchestration, business rules                | HTTP details, raw DB queries |
+| **Agent Decisions** | `agents/`     | Per-agent ESG/financial decision-making      | Training loop, HTTP concerns |
+| **RL Engine**       | `rl/`         | MASAC algorithm, neural nets, RL environment | Agent coordination           |
+| **Data Pipeline**   | `data/`       | Fetching + preprocessing raw market/ESG data | Portfolio decisions          |
+| **Data Contracts**  | `models/`     | DB table shapes + API schema validation      | Logic of any kind            |
+| **Infrastructure**  | `core/`       | DB connection pool, session management       | Application logic            |
+| **Background Jobs** | `workers/`    | Long-running async Celery tasks              | Synchronous request handling |
 
 ### Data Flow
 

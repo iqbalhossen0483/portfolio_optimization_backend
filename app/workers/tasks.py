@@ -1,6 +1,13 @@
 """
 Celery tasks for background training.
 Each task manages one (job_id, topology) training run.
+
+When config["data_source"] == "database":
+    - DatabaseMarketDataSource + DatabaseESGDataSource (all pre-computed, no API calls)
+    - DataNormalizer loaded from training_normalizer_params table (frozen, no refit)
+Otherwise (legacy path):
+    - MarketDataSource (yfinance) + ESGDataSource (stub / Bloomberg API)
+    - DataNormalizer fitted fresh on the training window
 """
 from __future__ import annotations
 import asyncio
@@ -8,8 +15,6 @@ import os
 import sys
 from datetime import datetime, date
 
-# Ensure project root is importable in worker subprocesses that re-import this
-# module with a clean sys.path (common on Windows and with prefork pools).
 _root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _root not in sys.path:
     sys.path.insert(0, _root)
@@ -38,8 +43,7 @@ celery_app.conf.timezone = "UTC"
 @celery_app.task(bind=True, name="run_training_job", max_retries=0)
 def run_training_job(self, job_id: str, config: dict) -> dict:
     """
-    Main training entry point.  Runs each topology sequentially in the worker
-    (parallel topology runs can be achieved by spawning separate tasks).
+    Main training entry point.  Runs each topology sequentially.
     """
     return asyncio.get_event_loop().run_until_complete(
         _async_run_training(job_id, config)
@@ -53,40 +57,69 @@ async def _async_run_training(job_id: str, config: dict) -> dict:
     from sqlalchemy.orm import sessionmaker
     from app.models.domain import TrainingJob
     from app.data.pipeline import DataPipeline
-    from app.data.sources.market import MarketDataSource
-    from app.data.sources.esg import ESGDataSource
     from app.rl.trainer import TrainingOrchestrator
     import redis.asyncio as aioredis
 
     engine = create_async_engine(cfg.postgres_dsn)
     SessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
     redis_client = aioredis.from_url(cfg.redis_url)
-    market_src = MarketDataSource(redis_client, ttl=cfg.redis_ttl_market)
-    esg_src    = ESGDataSource(
-        bloomberg_api_key=cfg.bloomberg_api_key,
-        lesg_api_key=cfg.lesg_api_key,
-        redis_client=redis_client,
-        use_stub=(not cfg.bloomberg_api_key),
-    )
-    pipeline = DataPipeline(market_src, esg_src)
 
     hp = config["hyperparams"]
     train_start = date.fromisoformat(config["train_start"])
     train_end   = date.fromisoformat(config["train_end"])
     val_start   = date.fromisoformat(config["val_start"])
     val_end     = date.fromisoformat(config["val_end"])
+    isins       = config["assets"]
 
-    # Prepare datasets
-    train_ds = await pipeline.prepare(config["assets"], train_start, train_end, fit=True)
-    val_ds   = await pipeline.prepare(
-        config["assets"], val_start, val_end,
-        fit=False, normalizer=train_ds.normalizer
-    )
+    # ── Data source selection ─────────────────────────────────────────────────
+    if config.get("data_source") == "database":
+        from app.data.sources.database import (
+            DatabaseMarketDataSource,
+            DatabaseESGDataSource,
+        )
+        from app.data.preprocessing.normalizer import DataNormalizer
 
+        market_src = DatabaseMarketDataSource(cfg.postgres_dsn)
+        esg_src    = DatabaseESGDataSource(cfg.postgres_dsn)
+        pipeline   = DataPipeline(market_src, esg_src)
+
+        # Load frozen normalizer params from DB (fitted in Stage 3, no refit)
+        frozen_normalizer = await DataNormalizer.load_from_db(job_id, cfg.postgres_dsn)
+
+        log.info("stage4_db_sources", job_id=job_id, n_assets=len(isins))
+
+        train_ds = await pipeline.prepare(
+            isins, train_start, train_end,
+            fit=False, normalizer=frozen_normalizer,
+        )
+        val_ds = await pipeline.prepare(
+            isins, val_start, val_end,
+            fit=False, normalizer=frozen_normalizer,
+        )
+    else:
+        # Legacy path: yfinance + ESG stub (backward compat — non-XLSX jobs)
+        from app.data.sources.market import MarketDataSource
+        from app.data.sources.esg import ESGDataSource
+
+        market_src = MarketDataSource(redis_client, ttl=cfg.redis_ttl_market)
+        esg_src    = ESGDataSource(
+            bloomberg_api_key=cfg.bloomberg_api_key,
+            lesg_api_key=cfg.lesg_api_key,
+            redis_client=redis_client,
+            use_stub=(not cfg.bloomberg_api_key),
+        )
+        pipeline = DataPipeline(market_src, esg_src)
+
+        train_ds = await pipeline.prepare(isins, train_start, train_end, fit=True)
+        val_ds   = await pipeline.prepare(
+            isins, val_start, val_end,
+            fit=False, normalizer=train_ds.normalizer,
+        )
+
+    # ── Training loop ─────────────────────────────────────────────────────────
     results = []
     async with SessionLocal() as db:
-        from sqlalchemy import select, update
+        from sqlalchemy import update
         await db.execute(
             update(TrainingJob)
             .where(TrainingJob.id == job_id)
@@ -95,10 +128,9 @@ async def _async_run_training(job_id: str, config: dict) -> dict:
         await db.commit()
 
         for topology in config["topologies"]:
-            # Check stop signal
             stop = await redis_client.get(f"stop:{job_id}")
             if stop:
-                log.info("Stop requested", job_id=job_id, topology=topology)
+                log.info("stop_requested", job_id=job_id, topology=topology)
                 break
 
             trainer = TrainingOrchestrator(
@@ -113,21 +145,17 @@ async def _async_run_training(job_id: str, config: dict) -> dict:
             result = await trainer.run()
             results.append(result)
 
-            # Update job record with best metrics
-            best_sharpe = result.get("best_sharpe")
-            best_mu_esg = result.get("best_mu_esg")
             await db.execute(
                 update(TrainingJob)
                 .where(TrainingJob.id == job_id)
                 .values(
                     current_step=result["steps_completed"],
-                    best_sharpe=best_sharpe,
-                    best_mu_esg=best_mu_esg,
+                    best_sharpe=result.get("best_sharpe"),
+                    best_mu_esg=result.get("best_mu_esg"),
                 )
             )
             await db.commit()
 
-        # Mark completed
         await db.execute(
             update(TrainingJob)
             .where(TrainingJob.id == job_id)

@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     macd_fast: int = 12
     macd_slow: int = 26
     macd_signal: int = 9
-    macd_warmup_days: int = 26
+    # warmup = cfg.macd_slow (computed inline where needed — not hardcoded here)
 
     # Validation window
     validation_window_days: int = 63   # 1 calendar quarter

@@ -38,6 +38,10 @@ aiohttp==3.13.5
 prometheus-fastapi-instrumentator==7.1.0
 structlog==25.5.0
 
+# XLSX ingestion + multipart upload
+openpyxl==3.1.5
+python-multipart==0.0.20
+
 # Testing
 pytest==9.0.3
 pytest-asyncio==1.3.0

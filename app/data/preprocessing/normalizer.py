@@ -159,6 +159,104 @@ class DataNormalizer:
         self.fit(market_data)
         return self.transform(market_data, bloomberg_esg, lesg_esg)
 
+    def fit_transform_market_only(
+        self,
+        market_data: dict[str, np.ndarray],
+    ) -> dict[str, np.ndarray]:
+        """
+        Fits and normalizes only time-series features (OHLCV + RSI + MACD + returns).
+        Used when ESG cross-sectional normalization was already done in Stage 2 and is
+        provided separately (esg_b_norm, esg_l_norm, delta_esg, mu_esg passed in by caller).
+        """
+        self.fit(market_data)
+        return self.transform_market_only(market_data)
+
+    def transform_market_only(
+        self,
+        market_data: dict[str, np.ndarray],
+    ) -> dict[str, np.ndarray]:
+        """
+        Applies frozen time-series scalers to OHLCV + indicators without touching ESG.
+        Call on validation window to avoid look-ahead (uses training-window min/max).
+        """
+        assert self._fitted, "Call fit() or fit_transform_market_only() first"
+        result: dict[str, np.ndarray] = {}
+        for key in ("open", "high", "low", "close", "volume", "rsi", "macd_hist", "returns"):
+            result[key + "_norm"] = self._ts_scalers[key].transform(market_data[key])
+        return result
+
+    def to_param_records(self, job_id: str, isins: list[str]) -> list[dict]:
+        """
+        Exports frozen min/max scalers as flat dicts ready for bulk-insert into
+        training_normalizer_params table.  Returns 8 × N records (N = len(isins)).
+        Keys: job_id, isin, feature_name, min_val, max_val.
+        """
+        assert self._fitted, "Call fit() first"
+        features = ["open", "high", "low", "close", "volume", "rsi", "macd_hist", "returns"]
+        records: list[dict] = []
+        for feat in features:
+            scaler = self._ts_scalers[feat]
+            assert scaler.is_fitted
+            for j, isin in enumerate(isins):
+                records.append({
+                    "job_id": job_id,
+                    "isin": isin,
+                    "feature_name": feat,
+                    "min_val": float(scaler._scaler.mins[j]),
+                    "max_val": float(scaler._scaler.maxs[j]),
+                })
+        return records
+
+    @classmethod
+    async def load_from_db(cls, job_id: str, dsn: str) -> "DataNormalizer":
+        """
+        Reconstructs a frozen DataNormalizer from training_normalizer_params rows.
+        N is derived dynamically from the number of distinct ISINs in the table.
+        """
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import create_async_engine
+        import pandas as pd
+
+        engine = create_async_engine(dsn, future=True)
+        try:
+            async with engine.connect() as conn:
+                rows = await conn.execute(
+                    text("""
+                        SELECT isin, feature_name, min_val, max_val
+                        FROM training_normalizer_params
+                        WHERE job_id = :job_id
+                        ORDER BY feature_name, isin
+                    """),
+                    {"job_id": job_id},
+                )
+                df = pd.DataFrame(rows.fetchall(), columns=rows.keys())
+        finally:
+            await engine.dispose()
+
+        if df.empty:
+            raise ValueError(f"No normalizer params found for job_id={job_id}")
+
+        isins = sorted(df["isin"].unique().tolist())
+        n = len(isins)
+        isin_idx = {isin: i for i, isin in enumerate(isins)}
+
+        normalizer = cls(n_assets=n)
+        features = ["open", "high", "low", "close", "volume", "rsi", "macd_hist", "returns"]
+        for feat in features:
+            sub = df[df["feature_name"] == feat]
+            mins = np.zeros(n)
+            maxs = np.zeros(n)
+            for _, row in sub.iterrows():
+                j = isin_idx[row["isin"]]
+                mins[j] = row["min_val"]
+                maxs[j] = row["max_val"]
+            scaler = TimeSeriesNormalizer()
+            scaler._scaler = FrozenScaler(mins=mins, maxs=maxs)
+            normalizer._ts_scalers[feat] = scaler
+
+        normalizer._fitted = True
+        return normalizer
+
     # ── State vector assembly ─────────────────────────────────────────────────
 
     @staticmethod

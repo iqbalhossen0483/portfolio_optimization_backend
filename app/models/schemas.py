@@ -2,7 +2,7 @@ from __future__ import annotations
 from datetime import date
 from enum import Enum
 from typing import Any
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # ── Enumerations ──────────────────────────────────────────────────────────────
@@ -31,52 +31,112 @@ class TrainingStatus(str, Enum):
 # ── Hyperparameters ───────────────────────────────────────────────────────────
 
 class HyperParams(BaseModel):
-    alpha_1: float = Field(default=0.5,  ge=0.0, le=1.0, description="Bloomberg ESG weight (Agents A, C)")
-    alpha_2: float = Field(default=0.5,  ge=0.0, le=1.0, description="LESG ESG weight (Agents A, C)")
-    alpha_3: float = Field(default=0.01, ge=0.0, le=0.1, description="Financial agent ESG bias (≈0)")
-    beta:    float = Field(default=0.3,  ge=0.0, le=1.0, description="Shared ambiguity penalty (Portfolio C)")
-    lam:     float = Field(default=0.4,  ge=0.0, le=1.0, description="Signed disagreement sensitivity (Portfolio B)")
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "alpha_1": 0.5,
+            "alpha_2": 0.5,
+            "alpha_3": 0.01,
+            "beta": 0.3,
+            "lam": 0.4,
+        }
+    })
+
+    alpha_1: float = Field(
+        default=0.5, ge=0.0, le=1.0,
+        description="Bloomberg ESG weight in the reward function (Portfolios A and C).",
+    )
+    alpha_2: float = Field(
+        default=0.5, ge=0.0, le=1.0,
+        description="LESG ESG weight in the reward function (Portfolios A and C).",
+    )
+    alpha_3: float = Field(
+        default=0.01, ge=0.0, le=0.1,
+        description="Financial agent ESG bias — kept near 0 by design so the financial agent focuses on returns.",
+    )
+    beta: float = Field(
+        default=0.3, ge=0.0, le=1.0,
+        description="Shared ambiguity penalty strength β · ΔESGᵢₜ applied in the Cooperative topology (Portfolio C only).",
+    )
+    lam: float = Field(
+        default=0.4, ge=0.0, le=1.0,
+        description="Signed disagreement sensitivity λ (Portfolio B only).",
+    )
 
 
 # ── Portfolio generation ──────────────────────────────────────────────────────
 
 class PortfolioGenerateRequest(BaseModel):
-    assets: list[str] = Field(..., min_length=2, description="List of ISINs")
-    portfolio_model: PortfolioModel = PortfolioModel.C
-    allocation_amount: float = Field(..., gt=0, description="Total capital in base currency")
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "assets": ["GB0002875804", "US0378331005", "US30231G1022", "GB0005405286"],
+            "portfolio_model": "C",
+            "allocation_amount": 10_000_000,
+            "hyperparams": {
+                "alpha_1": 0.5,
+                "alpha_2": 0.5,
+                "alpha_3": 0.01,
+                "beta": 0.3,
+                "lam": 0.4,
+            },
+            "as_of_date": None,
+        }
+    })
+
+    assets: list[str] = Field(
+        ..., min_length=2,
+        description="List of ISINs to include in the portfolio. Minimum 2.",
+    )
+    portfolio_model: PortfolioModel = Field(
+        default=PortfolioModel.C,
+        description=(
+            "Which reward model to use:\n"
+            "- **A** — ESG consensus (Bloomberg + LESG weighted average)\n"
+            "- **B** — Signed disagreement (each agent bets its own ESG source)\n"
+            "- **C** — Full model: consensus + uncertainty penalty β · ΔESGᵢₜ (recommended)"
+        ),
+    )
+    allocation_amount: float = Field(
+        ..., gt=0,
+        description="Total capital to allocate in base currency (e.g. GBP, USD).",
+    )
     hyperparams: HyperParams = Field(default_factory=HyperParams)
-    as_of_date: date | None = None
+    as_of_date: date | None = Field(
+        default=None,
+        description="Use prices/ESG as of this date. Defaults to the latest available date.",
+    )
 
 
 class AssetAllocation(BaseModel):
-    isin: str
-    sector: str
-    weight: float = Field(..., ge=0.0, le=1.0)
-    allocation: float
-    return_ann: float
-    risk_ann: float
-    sharpe: float
-    mu_esg: float
-    delta_esg: float
+    isin: str = Field(description="Asset ISIN")
+    sector: str = Field(description="Sector classification")
+    weight: float = Field(..., ge=0.0, le=1.0, description="Portfolio weight ∈ [0, 1]")
+    allocation: float = Field(description="Capital allocated to this asset in base currency")
+    return_ann: float = Field(description="Annualised return over the evaluation window")
+    risk_ann: float = Field(description="Annualised volatility (std of daily returns × √252)")
+    sharpe: float = Field(description="Annualised Sharpe ratio")
+    mu_esg: float = Field(description="μESGᵢ = (esg_b_norm + esg_l_norm) / 2 — consensus score")
+    delta_esg: float = Field(description="|esg_b_norm − esg_l_norm| — disagreement magnitude")
 
 
 class AggregateMetrics(BaseModel):
-    portfolio_return: float
-    portfolio_risk: float
-    portfolio_sharpe: float
-    portfolio_mu_esg: float
-    portfolio_delta_esg: float
+    portfolio_return: float = Field(description="Weighted portfolio annualised return")
+    portfolio_risk: float = Field(description="Weighted portfolio annualised volatility")
+    portfolio_sharpe: float = Field(description="Portfolio-level Sharpe ratio")
+    portfolio_mu_esg: float = Field(description="Σᵢ wᵢ · μESGᵢ — portfolio ESG consensus")
+    portfolio_delta_esg: float = Field(description="Σᵢ wᵢ · ΔESGᵢ — portfolio ESG disagreement")
 
 
 class TopologyPanel(BaseModel):
     topology: Topology
     portfolio: list[AssetAllocation]
     aggregate_metrics: AggregateMetrics
-    strategic_summary: str
+    strategic_summary: str = Field(
+        description="Natural-language summary of the topology's allocation rationale."
+    )
 
 
 class PortfolioGenerateResponse(BaseModel):
-    query_id: str
+    query_id: str = Field(description="Unique ID for this comparison — use with GET /portfolio/{query_id}/comparison")
     portfolio_model: PortfolioModel
     allocation_amount: float
     as_of_date: date | None
@@ -97,6 +157,7 @@ class PortfolioGetResponse(BaseModel):
 # ── Training ──────────────────────────────────────────────────────────────────
 
 class TrainingRequest(BaseModel):
+    """Legacy JSON-body training request (non-XLSX path, kept for backward compat)."""
     portfolio_model: PortfolioModel
     topology: Topology = Topology.ALL
     assets: list[str] = Field(..., min_length=2)
@@ -118,43 +179,88 @@ class TrainingRequest(BaseModel):
 
 
 class TrainingJobResponse(BaseModel):
-    job_id: str
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "status": "queued",
+            "message": "Stages 1-3 complete. MASAC training queued.",
+        }
+    })
+
+    job_id: str = Field(description="UUID of the training job — use for status polling and WebSocket streaming")
     status: TrainingStatus
-    message: str = ""
+    message: str = Field(default="", description="Human-readable status message")
 
 
 class TrainingStatusResponse(BaseModel):
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "status": "running",
+            "step": 45000,
+            "max_steps": 500000,
+            "progress_pct": 9.0,
+            "entropy_rolling_std": 0.082,
+            "best_sharpe": 1.31,
+            "best_mu_esg": 0.68,
+            "current_rewards": {
+                "bloomberg": 0.018,
+                "lesg": 0.014,
+                "financial": 0.021,
+            },
+            "elapsed_seconds": 183.4,
+            "error_message": None,
+        }
+    })
+
     job_id: str
     status: TrainingStatus
-    step: int
-    max_steps: int
-    progress_pct: float
-    entropy_rolling_std: float | None
-    best_sharpe: float | None
-    best_mu_esg: float | None
-    current_rewards: dict[str, float] = Field(default_factory=dict)
-    elapsed_seconds: float | None
-    error_message: str | None = None
+    step: int = Field(description="Current training step")
+    max_steps: int = Field(description="Maximum training steps configured (default 500 000)")
+    progress_pct: float = Field(description="Completion percentage (step / max_steps × 100)")
+    entropy_rolling_std: float | None = Field(
+        description="100-step rolling std of mean policy entropy. Training stops when < 0.01."
+    )
+    best_sharpe: float | None = Field(description="Best Sharpe ratio seen so far across all steps")
+    best_mu_esg: float | None = Field(description="Best μESG value seen so far")
+    current_rewards: dict[str, float] = Field(
+        default_factory=dict,
+        description="Per-agent rewards at the latest step: bloomberg, lesg, financial",
+    )
+    elapsed_seconds: float | None = Field(description="Wall-clock seconds since training started")
+    error_message: str | None = Field(default=None, description="Error detail if status is 'failed'")
 
 
 # ── Data ─────────────────────────────────────────────────────────────────────
 
 class AssetInfo(BaseModel):
-    isin: str
-    name: str
-    sector: str
+    isin: str = Field(description="ISIN code")
+    name: str = Field(description="Company name")
+    sector: str = Field(description="Sector classification")
 
 
 class AssetsResponse(BaseModel):
     assets: list[AssetInfo]
-    total: int
+    total: int = Field(description="Total number of assets returned")
 
 
 class DataIngestionRequest(BaseModel):
-    assets: list[str]
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "assets": ["GB0002875804", "US0378331005"],
+            "start_date": "2020-01-01",
+            "end_date": "2024-12-31",
+            "sources": ["market", "bloomberg", "lesg"],
+        }
+    })
+
+    assets: list[str] = Field(description="List of ISINs to ingest")
     start_date: date
     end_date: date
-    sources: list[str] = Field(default_factory=lambda: ["market", "bloomberg", "lesg"])
+    sources: list[str] = Field(
+        default_factory=lambda: ["market", "bloomberg", "lesg"],
+        description="Data sources to fetch: market (OHLCV), bloomberg (ESG 0-100), lesg (ESG 0-10)",
+    )
 
 
 class DataIngestionResponse(BaseModel):
@@ -163,23 +269,25 @@ class DataIngestionResponse(BaseModel):
     status: str
 
 
-# ── WebSocket messages ────────────────────────────────────────────────────────
+# ── WebSocket message schemas (documented for reference) ─────────────────────
 
 class WsTrainingStep(BaseModel):
-    type: str = "step"
+    """Emitted every 500 training steps via WS /ws/training/{job_id}."""
+    type: str = Field(default="step")
     step: int
-    entropy: float
-    entropy_rolling_std: float
+    entropy: float = Field(description="Mean policy entropy across all agents at this step")
+    entropy_rolling_std: float = Field(description="100-step rolling std — convergence signal")
     reward_bloomberg: float
     reward_lesg: float
     reward_financial: float
     loss_actor: float
     loss_critic: float
-    alpha_t: float
+    alpha_t: float = Field(description="Current temperature parameter αₜ (entropy regularisation)")
 
 
 class WsTrainingConverged(BaseModel):
-    type: str = "converged"
+    """Emitted once when entropy converges or max_steps is reached."""
+    type: str = Field(default="converged")
     step: int
     final_sharpe: float
     mu_esg: float
@@ -187,6 +295,6 @@ class WsTrainingConverged(BaseModel):
 
 
 class WsError(BaseModel):
-    type: str = "error"
+    type: str = Field(default="error")
     message: str
     details: Any = None

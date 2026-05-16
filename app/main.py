@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.utils import get_openapi
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.config import get_settings
@@ -16,6 +17,107 @@ from app.api.routes import portfolio, training, data, websocket
 
 log = structlog.get_logger(__name__)
 cfg = get_settings()
+
+# ── Tag metadata — each group gets a description in Swagger UI ────────────────
+TAGS_METADATA = [
+    {
+        "name": "training",
+        "description": (
+            "**MASAC training jobs.**\n\n"
+            "Upload one or more `.xlsx` files containing historical OHLCV + ESG data. "
+            "The system runs a 4-stage pipeline:\n\n"
+            "1. **Stage 1** — Parse XLSX → compute `return_pct` + `macd_hist` from Close; "
+            "RSI taken directly from file → bulk-upsert to `assets`, `market_data`, `esg_scores`\n"
+            "2. **Stage 2** — Cross-sectional ESG normalisation per date across all N ISINs "
+            "→ store `esg_b_norm`, `esg_l_norm`, `delta_esg`, `mu_esg` in `esg_scores`\n"
+            "3. **Stage 3** — Fit time-series min/max normaliser on training window "
+            "→ store frozen params in `training_normalizer_params` (8 × N rows)\n"
+            "4. **Stage 4** — MASAC training reads ALL pre-computed features from DB via "
+            "`DatabaseMarketDataSource` + `DatabaseESGDataSource` (no external API calls). "
+            "Runs asynchronously in Celery."
+        ),
+    },
+    {
+        "name": "portfolio",
+        "description": (
+            "**Portfolio generation and comparison.**\n\n"
+            "Runs three game-theoretic topologies — Cooperative, Competitive, Mixed — "
+            "concurrently using the best available trained MASAC model. "
+            "Returns three independent portfolio panels for side-by-side comparison.\n\n"
+            "| Topology | β penalty | Effect |\n"
+            "|---|---|---|\n"
+            "| Cooperative | full β | Agents penalised for ESG disagreement |\n"
+            "| Competitive | β = 0 | Each agent pursues its own ESG source |\n"
+            "| Mixed | partial β | Balanced between cooperation and competition |"
+        ),
+    },
+    {
+        "name": "data",
+        "description": (
+            "**Asset and data management.**\n\n"
+            "Query ingested assets and trigger legacy data ingestion (yfinance / Bloomberg stub). "
+            "The primary ingestion path is via `POST /training/start` with XLSX files."
+        ),
+    },
+    {
+        "name": "websocket",
+        "description": (
+            "**Real-time WebSocket streams.**\n\n"
+            "- `WS /ws/training/{job_id}` — live MASAC step metrics via Redis PubSub\n"
+            "- `WS /ws/portfolio/{session_id}` — interactive hyperparameter updates + "
+            "instant portfolio recomputation"
+        ),
+    },
+    {
+        "name": "system",
+        "description": "Health check and system status.",
+    },
+]
+
+_DESCRIPTION = """\
+## Multi-Agent Deep Reinforcement Learning Portfolio Optimisation
+
+Resolves ESG rating disagreement between **Bloomberg** (0–100) and **LESG** (0–10) through
+a three-agent **MASAC** framework. Three game-theoretic topologies run concurrently and
+return side-by-side portfolio panels for direct comparison.
+
+### Key concepts
+
+| Term | Meaning |
+|---|---|
+| **MASAC** | Multi-Agent Soft Actor-Critic — 3 actors, 6 critics (2 per agent), shared replay buffer |
+| **CTDE** | Centralised Training, Decentralised Execution — critics see all agents, actors see local obs only |
+| **Portfolio A** | ESG consensus — Bloomberg + LESG weighted average |
+| **Portfolio B** | Signed disagreement — each agent bets its own ESG source is correct |
+| **Portfolio C** | Full model — consensus + uncertainty penalty β · ΔESGᵢₜ (recommended) |
+| **State vector** | 10N features per timestep: [OHLCV(5N) \\| RSI(N) \\| MACD(N) \\| Return(N) \\| ΔESG(N) \\| μESG(N)] |
+| **N** | Number of assets — always dynamic, derived from uploaded XLSX, never hardcoded |
+
+### Data pipeline stages
+
+```
+POST /training/start  (multipart: .xlsx files + form fields)
+     │
+     ├─ Stage 1: XLSX → market_data + esg_scores (return_pct & macd_hist computed)
+     ├─ Stage 2: Cross-sectional ESG norm → esg_scores (esg_b_norm, delta_esg, mu_esg)
+     ├─ Stage 3: Time-series normaliser fit → training_normalizer_params (8 × N rows)
+     └─ Stage 4: MASAC training (Celery) — pure DB reads, no external APIs
+```
+
+### XLSX file format  *(sheet name: `Stock_ESG_Dataset`)*
+
+| Column | Type | Notes |
+|---|---|---|
+| Date | date | Trading date |
+| ISIN | string | Asset identifier — N is derived from unique ISINs |
+| Company name | string | — |
+| Sector | string | — |
+| Open / High / Low / Close | float | Raw OHLCV — stored as-is |
+| Volume | string / float | Accepts `10.5M`, `2.3K`, `1B`, `1T` or plain number |
+| RSI | float | Pre-computed — taken directly from file, **not** recomputed |
+| Bloom. ESG (0-100) | float | Bloomberg ESG score |
+| LESG ESG (0-10) | float | LESG ESG score |
+"""
 
 
 @asynccontextmanager
@@ -32,19 +134,22 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     app = FastAPI(
-        title=cfg.app_name,
+        title="MADRL Portfolio System",
         version=cfg.app_version,
-        description=(
-            "Multi-Agent Deep Reinforcement Learning portfolio optimization system. "
-            "Runs three ESG-aware MASAC agents under Cooperative, Competitive, and Mixed "
-            "game-theoretic topologies to generate side-by-side portfolio comparisons."
-        ),
+        description=_DESCRIPTION,
+        openapi_tags=TAGS_METADATA,
         lifespan=lifespan,
         docs_url="/docs",
         redoc_url="/redoc",
+        contact={
+            "name": "MADRL Portfolio",
+            "email": "uni.soton.uk@gmail.com",
+        },
+        license_info={
+            "name": "Proprietary",
+        },
     )
 
-    # CORS
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -52,17 +157,21 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Prometheus metrics
     Instrumentator().instrument(app).expose(app)
 
-    # Routers
     api_prefix = "/api/v1"
     app.include_router(portfolio.router, prefix=api_prefix)
     app.include_router(training.router,  prefix=api_prefix)
     app.include_router(data.router,      prefix=api_prefix)
     app.include_router(websocket.router)
 
-    @app.get("/health", tags=["system"])
+    @app.get(
+        "/health",
+        tags=["system"],
+        summary="System health check",
+        description="Returns `ok` when the API process is running. Does not probe DB or Redis.",
+        response_description="Service is up",
+    )
     async def health():
         return {"status": "ok", "version": cfg.app_version}
 
