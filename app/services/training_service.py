@@ -66,7 +66,8 @@ class TrainingService:
         await self._db.commit()
 
         from app.workers.tasks import run_training_job
-        run_training_job.delay(job_id, config)  # type: ignore[union-attr]
+        import asyncio
+        await asyncio.to_thread(run_training_job.delay, job_id, config)
 
         log.info("training_job_queued", job_id=job_id, topologies=topologies)
         return job_id
@@ -142,7 +143,8 @@ class TrainingService:
         log.info("stage3_done", job_id=job_id, param_rows=len(param_records))
 
         from app.workers.tasks import run_training_job
-        run_training_job.delay(job_id, config)  # type: ignore[union-attr]
+        import asyncio
+        await asyncio.to_thread(run_training_job.delay, job_id, config)
 
         log.info("stage4_queued", job_id=job_id, n_assets=len(isins),
                  topologies=topologies)

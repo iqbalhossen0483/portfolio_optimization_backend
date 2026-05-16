@@ -59,22 +59,22 @@ POST /training/start (.xlsx files)
 **State vector per timestep:** `10N` features — `[OHLCV(5N) | RSI(N) | MACD(N) | Return(N) | ΔESG(N) | μESG(N)]`
 **N** (number of assets) and **T** (timesteps) are always dynamic — derived from the uploaded XLSX, never hardcoded.
 
-| Topology | β penalty | Behaviour |
-|---|---|---|
-| Cooperative | full β | Penalises ESG-ambiguous assets — conservative, ESG-aligned |
-| Competitive | β = 0 | Each agent maximises its own ESG source — divergent weights |
-| Mixed | partial β | Balanced between cooperation and competition |
+| Topology    | β penalty | Behaviour                                                   |
+| ----------- | --------- | ----------------------------------------------------------- |
+| Cooperative | full β    | Penalises ESG-ambiguous assets — conservative, ESG-aligned  |
+| Competitive | β = 0     | Each agent maximises its own ESG source — divergent weights |
+| Mixed       | partial β | Balanced between cooperation and competition                |
 
 ---
 
 ## Prerequisites
 
-| Requirement | Version |
-|---|---|
-| Docker & Docker Compose | Docker 24+ |
-| Python | 3.11+ (dev only) |
-| Git | any |
-| NVIDIA GPU | optional — CUDA 12.x for faster training |
+| Requirement             | Version                                  |
+| ----------------------- | ---------------------------------------- |
+| Docker & Docker Compose | Docker 24+                               |
+| Python                  | 3.11+ (dev only)                         |
+| Git                     | any                                      |
+| NVIDIA GPU              | optional — CUDA 12.x for faster training |
 
 ---
 
@@ -103,20 +103,13 @@ GOOGLE_API_KEY=your_google_api_key
 docker compose up --build -d
 ```
 
-| Service | URL |
-|---|---|
-| API | http://localhost:8000 |
-| Swagger UI | http://localhost:8000/docs |
-| ReDoc | http://localhost:8000/redoc |
-| Flower (Celery monitor) | http://localhost:5555 |
-| Prometheus | http://localhost:9090 |
-
-### 3. Apply database migrations
-
-```bash
-# Run inside the api container
-docker compose exec api alembic upgrade head
-```
+| Service                 | URL                         |
+| ----------------------- | --------------------------- |
+| API                     | http://localhost:8000       |
+| Swagger UI              | http://localhost:8000/docs  |
+| ReDoc                   | http://localhost:8000/redoc |
+| Flower (Celery monitor) | http://localhost:5555       |
+| Prometheus              | http://localhost:9090       |
 
 ### 4. Verify
 
@@ -133,9 +126,9 @@ Development mode mounts `./app` as a live volume — **no image rebuild after co
 
 Two files handle this:
 
-| File | Purpose |
-|---|---|
-| `Dockerfile.development` | Dev image: BuildKit pip cache, `watchfiles`, `debugpy` |
+| File                     | Purpose                                                            |
+| ------------------------ | ------------------------------------------------------------------ |
+| `Dockerfile.development` | Dev image: BuildKit pip cache, `watchfiles`, `debugpy`             |
 | `docker-compose.dev.yml` | Overrides: live volume, `--reload`, debug port, no resource limits |
 
 ### 1. Start dev stack
@@ -146,14 +139,17 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 
 # All subsequent starts — no rebuild needed
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+
+# restart the queue worker
+docker compose -f docker-compose.yml -f docker-compose.dev.yml restart api worker
 ```
 
-| Service | URL |
-|---|---|
-| API + Swagger | http://localhost:8000/docs |
-| Flower | http://localhost:5555 |
-| Prometheus | http://localhost:9090 |
-| debugpy (IDE attach) | localhost:5678 |
+| Service              | URL                        |
+| -------------------- | -------------------------- |
+| API + Swagger        | http://localhost:8000/docs |
+| Flower               | http://localhost:5555      |
+| Prometheus           | http://localhost:9090      |
+| debugpy (IDE attach) | localhost:5678             |
 
 ### 2. Apply migrations
 
@@ -171,12 +167,12 @@ Save any file in app/  →  watchfiles detects change  →  uvicorn reloads  →
 
 ### Rebuild reference
 
-| What changed | Action |
-|---|---|
-| Any `app/` file | Nothing — volume mount, instant |
-| `requirements.txt` | `docker compose … up --build` — pip cache on host makes it fast |
-| `Dockerfile.development` | `docker compose … up --build` |
-| Base image / system deps | `docker compose … up --build --no-cache` |
+| What changed             | Action                                                          |
+| ------------------------ | --------------------------------------------------------------- |
+| Any `app/` file          | Nothing — volume mount, instant                                 |
+| `requirements.txt`       | `docker compose … up --build` — pip cache on host makes it fast |
+| `Dockerfile.development` | `docker compose … up --build`                                   |
+| Base image / system deps | `docker compose … up --build --no-cache`                        |
 
 ### VS Code remote debugger
 
@@ -276,25 +272,25 @@ curl -X POST http://localhost:8000/api/v1/training/start \
 
 **XLSX format** — sheet name must be `Stock_ESG_Dataset`:
 
-| Column | Type | Notes |
-|---|---|---|
-| `Date` | date | Trading date |
-| `ISIN` | string | Asset identifier — N derived from distinct ISINs |
-| `Company name` | string | |
-| `Sector` | string | |
-| `Open`, `High`, `Low`, `Close` | float | Raw OHLCV — stored as-is |
-| `Volume` | string / float | Accepts `10.5M`, `2.3K`, `1B`, `1T` or plain number |
-| `RSI` | float | RSI value |
-| `Bloom. ESG (0-100)` | float | Bloomberg ESG score |
-| `LESG ESG (0-10)` | float | LESG ESG score |
+| Column                         | Type           | Notes                                               |
+| ------------------------------ | -------------- | --------------------------------------------------- |
+| `Date`                         | date           | Trading date                                        |
+| `ISIN`                         | string         | Asset identifier — N derived from distinct ISINs    |
+| `Company name`                 | string         |                                                     |
+| `Sector`                       | string         |                                                     |
+| `Open`, `High`, `Low`, `Close` | float          | Raw OHLCV — stored as-is                            |
+| `Volume`                       | string / float | Accepts `10.5M`, `2.3K`, `1B`, `1T` or plain number |
+| `RSI`                          | float          | RSI value                                           |
+| `Bloom. ESG (0-100)`           | float          | Bloomberg ESG score                                 |
+| `LESG ESG (0-10)`              | float          | LESG ESG score                                      |
 
 **Portfolio models:**
 
-| Model | Reward structure |
-|---|---|
-| `A` | ESG consensus: `α₁·ESG_B_norm + α₂·ESG_L_norm + financial_return` |
-| `B` | Signed disagreement: each agent bets its own ESG source is correct |
-| `C` | Full model: consensus + `β·ΔESGᵢₜ` uncertainty penalty **(recommended)** |
+| Model | Reward structure                                                         |
+| ----- | ------------------------------------------------------------------------ |
+| `A`   | ESG consensus: `α₁·ESG_B_norm + α₂·ESG_L_norm + financial_return`        |
+| `B`   | Signed disagreement: each agent bets its own ESG source is correct       |
+| `C`   | Full model: consensus + `β·ΔESGᵢₜ` uncertainty penalty **(recommended)** |
 
 ---
 
@@ -410,36 +406,36 @@ curl http://localhost:8000/api/v1/portfolio/{query_id}/comparison
 
 ### Environment variables
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `POSTGRES_DSN` | yes | — | Async PostgreSQL DSN (`postgresql+asyncpg://...`) |
-| `REDIS_URL` | yes | — | Redis URL for cache and PubSub |
-| `REDIS_PASSWORD` | yes | — | Redis auth password |
-| `CELERY_BROKER_URL` | yes | — | Celery broker (Redis DB 1) |
-| `CELERY_RESULT_BACKEND` | yes | — | Celery results (Redis DB 2) |
-| `GOOGLE_API_KEY` | yes | — | Google AI key for ADK agents |
-| `ADK_MODEL` | no | `gemini-2.0-flash` | ADK LLM model |
-| `BLOOMBERG_API_KEY` | no | `""` | Bloomberg ESG API — stub data if empty |
-| `LESG_API_KEY` | no | `""` | LESG API — stub data if empty |
-| `MODEL_STORE_PATH` | no | `./model_store` | Directory for trained actor/critic weights |
-| `DEBUG` | no | `false` | Enables SQLAlchemy query logging |
-| `MASAC_MAX_STEPS` | no | `500000` | Maximum training steps per topology |
-| `MASAC_BATCH_SIZE` | no | `256` | Replay buffer sample size |
-| `MASAC_HIDDEN_SIZE` | no | `256` | Hidden layer width for Actor and Critic MLPs |
-| `MASAC_LR_ACTOR` | no | `3e-4` | Actor learning rate |
-| `MASAC_LR_CRITIC` | no | `3e-4` | Critic learning rate |
+| Variable                | Required | Default            | Description                                       |
+| ----------------------- | -------- | ------------------ | ------------------------------------------------- |
+| `POSTGRES_DSN`          | yes      | —                  | Async PostgreSQL DSN (`postgresql+asyncpg://...`) |
+| `REDIS_URL`             | yes      | —                  | Redis URL for cache and PubSub                    |
+| `REDIS_PASSWORD`        | yes      | —                  | Redis auth password                               |
+| `CELERY_BROKER_URL`     | yes      | —                  | Celery broker (Redis DB 1)                        |
+| `CELERY_RESULT_BACKEND` | yes      | —                  | Celery results (Redis DB 2)                       |
+| `GOOGLE_API_KEY`        | yes      | —                  | Google AI key for ADK agents                      |
+| `ADK_MODEL`             | no       | `gemini-2.0-flash` | ADK LLM model                                     |
+| `BLOOMBERG_API_KEY`     | no       | `""`               | Bloomberg ESG API — stub data if empty            |
+| `LESG_API_KEY`          | no       | `""`               | LESG API — stub data if empty                     |
+| `MODEL_STORE_PATH`      | no       | `./model_store`    | Directory for trained actor/critic weights        |
+| `DEBUG`                 | no       | `false`            | Enables SQLAlchemy query logging                  |
+| `MASAC_MAX_STEPS`       | no       | `500000`           | Maximum training steps per topology               |
+| `MASAC_BATCH_SIZE`      | no       | `256`              | Replay buffer sample size                         |
+| `MASAC_HIDDEN_SIZE`     | no       | `256`              | Hidden layer width for Actor and Critic MLPs      |
+| `MASAC_LR_ACTOR`        | no       | `3e-4`             | Actor learning rate                               |
+| `MASAC_LR_CRITIC`       | no       | `3e-4`             | Critic learning rate                              |
 
 ### Hyperparameters
 
 Hyperparameters are **not learned** — they encode investor preference before training. Selected via grid search on the validation window using Sharpe as primary metric and μESG as secondary.
 
-| Parameter | Default | Range | Role |
-|---|---|---|---|
-| `alpha_1` | `0.5` | `[0.0, 1.0]` | Bloomberg ESG weight in reward (Portfolios A, C) |
-| `alpha_2` | `0.5` | `[0.0, 1.0]` | LESG ESG weight in reward (Portfolios A, C) |
-| `alpha_3` | `0.01` | `[0.0, 0.1]` | Financial agent ESG bias — kept near 0 by design |
-| `beta` | `0.3` | `[0.0, 1.0]` | Ambiguity penalty strength `β·ΔESGᵢₜ` (Portfolio C, Cooperative topology) |
-| `lam` | `0.4` | `[0.0, 1.0]` | Signed disagreement sensitivity (Portfolio B) |
+| Parameter | Default | Range        | Role                                                                      |
+| --------- | ------- | ------------ | ------------------------------------------------------------------------- |
+| `alpha_1` | `0.5`   | `[0.0, 1.0]` | Bloomberg ESG weight in reward (Portfolios A, C)                          |
+| `alpha_2` | `0.5`   | `[0.0, 1.0]` | LESG ESG weight in reward (Portfolios A, C)                               |
+| `alpha_3` | `0.01`  | `[0.0, 0.1]` | Financial agent ESG bias — kept near 0 by design                          |
+| `beta`    | `0.3`   | `[0.0, 1.0]` | Ambiguity penalty strength `β·ΔESGᵢₜ` (Portfolio C, Cooperative topology) |
+| `lam`     | `0.4`   | `[0.0, 1.0]` | Signed disagreement sensitivity (Portfolio B)                             |
 
 ---
 
@@ -520,16 +516,16 @@ madrl_portfolio/
 
 ### Layer boundaries
 
-| Layer | Folder | Owns | Never touches |
-|---|---|---|---|
-| HTTP | `api/routes/` | URL paths, status codes, serialisation | Business logic |
-| Business logic | `services/` | Orchestration, business rules | HTTP, raw SQL |
-| Agents | `agents/` | Per-agent ESG/financial decisions | Training loop, HTTP |
-| RL engine | `rl/` | MASAC algorithm, neural nets, environment | Agent coordination |
-| Data pipeline | `data/` | Fetching, preprocessing, feature assembly | Portfolio decisions |
-| Data contracts | `models/` | DB shapes, API schema validation | Logic of any kind |
-| Infrastructure | `core/` | Connection pool, session management | Application logic |
-| Background jobs | `workers/` | Long-running async Celery tasks | Synchronous handling |
+| Layer           | Folder        | Owns                                      | Never touches        |
+| --------------- | ------------- | ----------------------------------------- | -------------------- |
+| HTTP            | `api/routes/` | URL paths, status codes, serialisation    | Business logic       |
+| Business logic  | `services/`   | Orchestration, business rules             | HTTP, raw SQL        |
+| Agents          | `agents/`     | Per-agent ESG/financial decisions         | Training loop, HTTP  |
+| RL engine       | `rl/`         | MASAC algorithm, neural nets, environment | Agent coordination   |
+| Data pipeline   | `data/`       | Fetching, preprocessing, feature assembly | Portfolio decisions  |
+| Data contracts  | `models/`     | DB shapes, API schema validation          | Logic of any kind    |
+| Infrastructure  | `core/`       | Connection pool, session management       | Application logic    |
+| Background jobs | `workers/`    | Long-running async Celery tasks           | Synchronous handling |
 
 ---
 

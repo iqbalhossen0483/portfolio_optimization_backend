@@ -16,12 +16,6 @@ services:
       context: .
       dockerfile: Dockerfile.development
     command:
-      - python
-      - -m
-      - debugpy
-      - --listen
-      - "0.0.0.0:5678"
-      - -m
       - uvicorn
       - app.main:app
       - --host
@@ -35,7 +29,6 @@ services:
       - "1"
     ports:
       - "8000:8000"
-      - "5678:5678" # debugpy — attach VS Code / PyCharm here
     volumes:
       - model_store:/app/model_store
       - ./app:/app/app # live mount — changes visible instantly, no rebuild

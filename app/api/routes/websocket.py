@@ -33,6 +33,21 @@ async def training_stream(
     """
     await websocket.accept()
     channel = f"pubsub:training:{job_id}"
+    snapshot_key = f"training:snapshot:{job_id}"
+
+    # Send the latest known state immediately (covers late subscribers who missed PubSub)
+    snapshot = await redis_client.get(snapshot_key)
+    if snapshot:
+        payload = snapshot.decode() if isinstance(snapshot, bytes) else snapshot
+        await websocket.send_text(payload)
+        try:
+            snap_data = json.loads(payload)
+            if snap_data.get("type") in ("converged", "error"):
+                # Training already finished — nothing left to stream
+                return
+        except json.JSONDecodeError:
+            pass
+
     pubsub = redis_client.pubsub()
     await pubsub.subscribe(channel)
     log.info("WS client subscribed to training stream", job_id=job_id)

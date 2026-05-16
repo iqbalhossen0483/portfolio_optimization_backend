@@ -56,9 +56,9 @@ class Settings(BaseSettings):
 
     # Technical indicator parameters
     rsi_period: int = 14
-    macd_fast: int = 12
-    macd_slow: int = 10
-    macd_signal: int = 9
+    macd_fast: int = 2
+    macd_slow: int = 3
+    macd_signal: int = 2
     # warmup = cfg.macd_slow (computed inline where needed — not hardcoded here)
 
     # Validation window

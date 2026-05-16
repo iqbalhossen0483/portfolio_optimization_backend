@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Training Monitor</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: monospace; background: #0d1117; color: #c9d1d9; padding: 20px; }
+  h1 { color: #58a6ff; margin-bottom: 16px; font-size: 18px; }
+
+  .controls { display: flex; gap: 10px; margin-bottom: 20px; align-items: center; }
+  input { background: #161b22; border: 1px solid #30363d; color: #c9d1d9; padding: 6px 10px;
+          border-radius: 6px; font-family: monospace; width: 120px; }
+  button { padding: 6px 16px; border-radius: 6px; border: none; cursor: pointer;
+           font-family: monospace; font-size: 13px; }
+  #connectBtn { background: #238636; color: #fff; }
+  #connectBtn.connected { background: #da3633; }
+  #status { font-size: 12px; color: #8b949e; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px; }
+  .card-label { font-size: 11px; color: #8b949e; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .card-value { font-size: 22px; color: #58a6ff; font-weight: bold; }
+  .card-value.green { color: #3fb950; }
+  .card-value.yellow { color: #d29922; }
+  .card-value.red { color: #f85149; }
+
+  #banner { display: none; padding: 10px 16px; border-radius: 6px; margin-bottom: 16px;
+            font-weight: bold; text-align: center; }
+  #banner.converged { background: #0f2e14; border: 1px solid #3fb950; color: #3fb950; }
+  #banner.error { background: #2a0000; border: 1px solid #f85149; color: #f85149; }
+
+  .log-header { color: #8b949e; font-size: 12px; margin-bottom: 6px; }
+  #log { background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+         padding: 12px; height: 320px; overflow-y: auto; font-size: 12px; line-height: 1.6; }
+  .log-step     { color: #58a6ff; }
+  .log-converged{ color: #3fb950; font-weight: bold; }
+  .log-error    { color: #f85149; }
+  .log-ts       { color: #484f58; margin-right: 8px; }
+
+  progress { width: 100%; height: 6px; border-radius: 3px; appearance: none;
+             -webkit-appearance: none; border: none; background: #21262d; margin-top: 4px; }
+  progress::-webkit-progress-bar   { background: #21262d; border-radius: 3px; }
+  progress::-webkit-progress-value { background: #58a6ff; border-radius: 3px; }
+</style>
+</head>
+<body>
+<h1>MADRL Training Monitor</h1>
+
+<div class="controls">
+  <label for="jobId" style="color:#8b949e;font-size:13px;">Job ID</label>
+  <input id="jobId" type="number" value="1" min="1">
+  <button id="connectBtn" onclick="toggle()">Connect</button>
+  <span id="status">Disconnected</span>
+</div>
+
+<div id="banner"></div>
+
+<div class="grid">
+  <div class="card">
+    <div class="card-label">Step</div>
+    <div class="card-value" id="vStep">—</div>
+    <progress id="pStep" value="0" max="500000"></progress>
+  </div>
+  <div class="card">
+    <div class="card-label">Mean Entropy</div>
+    <div class="card-value" id="vEntropy">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Entropy Rolling Std</div>
+    <div class="card-value" id="vStd">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Alpha T</div>
+    <div class="card-value" id="vAlpha">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Reward Bloomberg</div>
+    <div class="card-value" id="vRB">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Reward LESG</div>
+    <div class="card-value" id="vRL">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Reward Financial</div>
+    <div class="card-value" id="vRF">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Actor Loss</div>
+    <div class="card-value" id="vLA">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Critic Loss</div>
+    <div class="card-value" id="vLC">—</div>
+  </div>
+</div>
+
+<div class="log-header">Event log (newest first)</div>
+<div id="log"></div>
+
+<script>
+let ws = null;
+
+function toggle() {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.close();
+    return;
+  }
+  connect();
+}
+
+function connect() {
+  const jobId = document.getElementById('jobId').value.trim();
+  if (!jobId) return;
+
+  const url = `ws://localhost:8000/ws/training/${jobId}`;
+  setStatus('Connecting…', '#d29922');
+  hideBanner();
+
+  ws = new WebSocket(url);
+
+  ws.onopen = () => {
+    setStatus(`Connected — job ${jobId}`, '#3fb950');
+    document.getElementById('connectBtn').textContent = 'Disconnect';
+    document.getElementById('connectBtn').classList.add('connected');
+    appendLog(`Connected to job ${jobId}`, 'log-converged');
+  };
+
+  ws.onmessage = (e) => {
+    let data;
+    try { data = JSON.parse(e.data); } catch { appendLog(e.data, 'log-error'); return; }
+
+    if (data.type === 'warmup') {
+      const pct = Math.round(data.step / data.warmup_total * 100);
+      set('vStep', `${data.step.toLocaleString()} (warmup ${pct}%)`);
+      document.getElementById('pStep').value = data.step;
+      if (data.step === 500) appendLog('Warmup started — random transitions being collected', 'log-step');
+      else if (data.step % 5000 === 0) appendLog(data.message, 'log-step');
+    } else if (data.type === 'step') {
+      updateCards(data);
+      appendLog(formatStep(data), 'log-step');
+    } else if (data.type === 'converged') {
+      showBanner(`Training converged at step ${data.step} — Sharpe: ${n(data.final_sharpe, 4)}, μESG: ${n(data.mu_esg, 4)}`, 'converged');
+      appendLog(`CONVERGED at step ${data.step}`, 'log-converged');
+    } else if (data.type === 'error') {
+      showBanner(`Error: ${data.message}`, 'error');
+      appendLog(`ERROR: ${data.message}`, 'log-error');
+    } else {
+      appendLog(JSON.stringify(data), '');
+    }
+  };
+
+  ws.onerror = () => {
+    setStatus('Connection error', '#f85149');
+    appendLog('WebSocket error — is the API running?', 'log-error');
+  };
+
+  ws.onclose = () => {
+    setStatus('Disconnected', '#8b949e');
+    document.getElementById('connectBtn').textContent = 'Connect';
+    document.getElementById('connectBtn').classList.remove('connected');
+    appendLog('Disconnected', '');
+  };
+}
+
+function updateCards(d) {
+  set('vStep',    d.step?.toLocaleString());
+  set('vEntropy', n(d.entropy, 4));
+  set('vStd',     n(d.entropy_rolling_std, 6));
+  set('vAlpha',   n(d.alpha_t, 4));
+  set('vRB',      n(d.reward_bloomberg, 6));
+  set('vRL',      n(d.reward_lesg, 6));
+  set('vRF',      n(d.reward_financial, 6));
+  set('vLA',      n(d.loss_actor, 4));
+  set('vLC',      n(d.loss_critic, 4));
+
+  const pct = (d.step || 0) / 500000;
+  document.getElementById('pStep').value = d.step || 0;
+
+  // colour entropy std — green when close to convergence threshold 0.01
+  const stdEl = document.getElementById('vStd');
+  const std = d.entropy_rolling_std || 999;
+  stdEl.className = 'card-value ' + (std < 0.01 ? 'green' : std < 0.1 ? 'yellow' : '');
+}
+
+function formatStep(d) {
+  return `step=${d.step?.toLocaleString()}  H=${n(d.entropy,3)}  std=${n(d.entropy_rolling_std,5)}  `
+       + `rB=${n(d.reward_bloomberg,5)}  rL=${n(d.reward_lesg,5)}  rF=${n(d.reward_financial,5)}`;
+}
+
+function n(v, dec) { return (v === undefined || v === null) ? '—' : Number(v).toFixed(dec); }
+function set(id, val) { document.getElementById(id).textContent = val ?? '—'; }
+
+function appendLog(msg, cls) {
+  const log = document.getElementById('log');
+  const ts = new Date().toLocaleTimeString();
+  const line = document.createElement('div');
+  line.innerHTML = `<span class="log-ts">${ts}</span><span class="${cls}">${escHtml(msg)}</span>`;
+  log.prepend(line);
+  // cap at 200 lines
+  while (log.children.length > 200) log.removeChild(log.lastChild);
+}
+
+function setStatus(msg, color) {
+  const el = document.getElementById('status');
+  el.textContent = msg;
+  el.style.color = color;
+}
+
+function showBanner(msg, type) {
+  const b = document.getElementById('banner');
+  b.textContent = msg;
+  b.className = type;
+  b.style.display = 'block';
+}
+
+function hideBanner() {
+  document.getElementById('banner').style.display = 'none';
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+</script>
+</body>
+</html>

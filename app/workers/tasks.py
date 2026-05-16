@@ -47,9 +47,7 @@ def run_training_job(self, job_id: int, config: dict) -> dict:
     """
     Main training entry point.  Runs each topology sequentially.
     """
-    return asyncio.get_event_loop().run_until_complete(
-        _async_run_training(job_id, config)
-    )
+    return asyncio.run(_async_run_training(job_id, config))
 
 
 async def _async_run_training(job_id: int, config: dict) -> dict:
@@ -126,41 +124,54 @@ async def _async_run_training(job_id: int, config: dict) -> dict:
         )
         await db.commit()
 
-        for topology in config["topologies"]:
-            stop = await redis_client.get(f"stop:{job_id}")
-            if stop:
-                log.info("stop_requested", job_id=job_id, topology=topology)
-                break
+        try:
+            for topology in config["topologies"]:
+                stop = await redis_client.get(f"stop:{job_id}")
+                if stop:
+                    log.info("stop_requested", job_id=job_id, topology=topology)
+                    break
 
-            trainer = TrainingOrchestrator(
-                job_id=job_id,
-                dataset=train_ds,
-                portfolio_model=config["portfolio_model"],
-                topology=topology,
-                hyperparams=hp,
-                model_store_path=cfg.model_store_path,
-                redis_client=redis_client,
-            )
-            result = await trainer.run()
-            results.append(result)
+                trainer = TrainingOrchestrator(
+                    job_id=job_id,
+                    dataset=train_ds,
+                    portfolio_model=config["portfolio_model"],
+                    topology=topology,
+                    hyperparams=hp,
+                    model_store_path=cfg.model_store_path,
+                    redis_client=redis_client,
+                )
+                result = await trainer.run()
+                results.append(result)
+
+                await db.execute(
+                    update(TrainingJob)
+                    .where(TrainingJob.id == job_id)
+                    .values(
+                        current_step=result["steps_completed"],
+                        best_sharpe=result.get("best_sharpe"),
+                        best_mu_esg=result.get("best_mu_esg"),
+                    )
+                )
+                await db.commit()
 
             await db.execute(
                 update(TrainingJob)
                 .where(TrainingJob.id == job_id)
-                .values(
-                    current_step=result["steps_completed"],
-                    best_sharpe=result.get("best_sharpe"),
-                    best_mu_esg=result.get("best_mu_esg"),
-                )
+                .values(status="completed", completed_at=datetime.utcnow())
             )
             await db.commit()
 
-        await db.execute(
-            update(TrainingJob)
-            .where(TrainingJob.id == job_id)
-            .values(status="completed", completed_at=datetime.utcnow())
-        )
-        await db.commit()
+        except Exception as exc:
+            error_msg = f"{type(exc).__name__}: {exc}"
+            log.error("training_failed", job_id=job_id, error=error_msg)
+            await db.execute(
+                update(TrainingJob)
+                .where(TrainingJob.id == job_id)
+                .values(status="failed", error_message=error_msg[:1024],
+                        completed_at=datetime.utcnow())
+            )
+            await db.commit()
+            raise   # re-raise so Celery marks the task as FAILURE too
 
     await redis_client.aclose()
     return {"job_id": job_id, "results": results}

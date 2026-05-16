@@ -122,6 +122,10 @@ class TrainingOrchestrator:
 
             obs = result.obs if not result.done else self.env.reset()
 
+            # ── Warmup heartbeat (no gradient update yet) ──────────────────────
+            if warmup and global_step % 500 == 0:
+                await self._publish_warmup(global_step)
+
             # ── Gradient update ────────────────────────────────────────────────
             if not warmup:
                 metrics = self.masac.update()
@@ -153,7 +157,7 @@ class TrainingOrchestrator:
                             best_sharpe = sharpe
                             best_mu_esg = mu_esg
                             ckpt_path = os.path.join(
-                                self.model_store_path, self.job_id, self.topology
+                                self.model_store_path, str(self.job_id), self.topology
                             )
                             self.masac.save(ckpt_path)
                             log.info("Checkpoint saved", step=global_step,
@@ -208,10 +212,26 @@ class TrainingOrchestrator:
 
     # ── Redis publishing ──────────────────────────────────────────────────────
 
-    async def _publish_step(self, step: int, metrics, rolling_std: float, result) -> None:
+    async def _publish(self, payload: dict) -> None:
+        """Publish to PubSub and store as snapshot for late WS subscribers."""
         if not self._redis:
             return
-        payload = {
+        data = json.dumps(payload)
+        channel = f"pubsub:training:{self.job_id}"
+        snapshot_key = f"training:snapshot:{self.job_id}"
+        await self._redis.publish(channel, data)
+        await self._redis.setex(snapshot_key, 3600, data)  # keep snapshot for 1 hour
+
+    async def _publish_warmup(self, step: int) -> None:
+        await self._publish({
+            "type": "warmup",
+            "step": step,
+            "warmup_total": cfg.masac_warmup_steps,
+            "message": f"Warmup {step}/{cfg.masac_warmup_steps} — collecting random transitions",
+        })
+
+    async def _publish_step(self, step: int, metrics, rolling_std: float, result) -> None:
+        await self._publish({
             "type": "step",
             "step": step,
             "entropy": (metrics.entropy_bloomberg + metrics.entropy_lesg + metrics.entropy_financial) / 3,
@@ -222,17 +242,13 @@ class TrainingOrchestrator:
             "loss_actor": (metrics.loss_actor_bloomberg + metrics.loss_actor_lesg + metrics.loss_actor_financial) / 3,
             "loss_critic": (metrics.loss_critic_bloomberg + metrics.loss_critic_lesg + metrics.loss_critic_financial) / 3,
             "alpha_t": metrics.alpha_t_bloomberg,
-        }
-        await self._redis.publish(f"pubsub:training:{self.job_id}", json.dumps(payload))
+        })
 
     async def _publish_converged(self, step: int, sharpe: float | None, mu_esg: float | None) -> None:
-        if not self._redis:
-            return
-        payload = {
+        await self._publish({
             "type": "converged",
             "step": step,
             "final_sharpe": sharpe or 0.0,
             "mu_esg": mu_esg or 0.0,
             "message": f"Training converged at step {step}",
-        }
-        await self._redis.publish(f"pubsub:training:{self.job_id}", json.dumps(payload))
+        })

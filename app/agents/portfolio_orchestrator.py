@@ -252,7 +252,7 @@ class PortfolioOrchestratorAgent(Agent):
                 ("financial", self._financial),
             ]:
                 path = os.path.join(
-                    self.model_store_path, self.job_id, topology, f"{agent_name}.pt"
+                    self.model_store_path, str(self.job_id), topology, f"{agent_name}.pt"
                 )
                 if not os.path.exists(path):
                     log.warning("Actor weights not found — using random init",
