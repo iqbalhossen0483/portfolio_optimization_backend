@@ -1,0 +1,67 @@
+# syntax=docker/dockerfile:1
+# Development image — NOT for production.
+#
+# Cache strategy (fastest possible rebuild when only app code changes):
+#   Layer 1: base image + system packages   → rebuilds: almost never
+#   Layer 2: pip install requirements.txt   → rebuilds: only when requirements.txt changes
+#   Layer 3: pip install dev extras         → rebuilds: only when this file changes
+#   Layer 4: app/ source copy              → rebuilds: every code change
+#                                             (irrelevant in dev — app/ is mounted as a volume)
+#
+# BuildKit pip cache (--mount=type=cache) keeps the pip download cache on the
+# Docker host between builds so packages are never re-downloaded.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+
+FROM python:3.11-slim
+
+# ── Environment ───────────────────────────────────────────────────────────────
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    # Force watchfiles to use polling — required on Windows Docker Desktop (WSL2
+    # bind mounts don't reliably deliver inotify events to the container).
+    WATCHFILES_FORCE_POLLING=true
+
+WORKDIR /app
+
+# ── Layer 1: system packages ──────────────────────────────────────────────────
+# Includes git so pip can install VCS dependencies if needed.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        libpq-dev \
+        curl \
+        git \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Layer 2: production dependencies ─────────────────────────────────────────
+# Copy requirements BEFORE the source so this layer is cached when only
+# app code changes. BuildKit cache mount keeps pip's download cache on the
+# host — packages are never re-downloaded on subsequent builds.
+COPY requirements.txt .
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt
+
+# ── Layer 3: dev-only extras ──────────────────────────────────────────────────
+# watchfiles  → uvicorn uses it for fast, reliable file-change detection
+# debugpy     → VS Code / PyCharm remote debugger (attach on port 5678)
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install watchfiles==1.0.5 debugpy==1.8.14
+
+# ── Layer 4: application source (fallback — overridden by volume in compose) ──
+COPY app/ ./app/
+
+RUN mkdir -p /app/model_store
+
+# 8000 — FastAPI
+# 5678 — debugpy remote debugger
+EXPOSE 8000 5678
+
+# Default dev command (overridden in docker-compose.dev.yml per service)
+CMD ["uvicorn", "app.main:app", \
+     "--host", "0.0.0.0", \
+     "--port", "8000", \
+     "--reload", \
+     "--reload-dir", "/app/app", \
+     "--workers", "1"]

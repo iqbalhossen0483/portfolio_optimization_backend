@@ -122,6 +122,14 @@ class DataPipeline:
         macd_hist_raw = macd_hist_raw[warmup:]
         T = len(dates)
 
+        if T == 0:
+            raise ValueError(
+                f"No usable rows after removing MACD warmup ({warmup} rows). "
+                f"The date window contains fewer than {warmup + 1} trading days. "
+                f"Upload a dataset with at least {warmup + 1} rows per ISIN, "
+                f"or reduce macd_slow (currently {cfg.macd_slow}) in your .env."
+            )
+
         market_data = {
             "open": open_, "high": high_, "low": low_,
             "close": close_, "volume": volume_,

@@ -21,7 +21,7 @@ if _root not in sys.path:
 
 import structlog
 from celery import Celery
-from celery.app.task import Task as CeleryTask
+
 from celery.signals import task_failure, task_success
 
 from app.config import get_settings
@@ -34,14 +34,16 @@ celery_app = Celery(
     broker=cfg.celery_broker_url,
     backend=cfg.celery_result_backend,
 )
-celery_app.conf.task_serializer = "json"
-celery_app.conf.result_serializer = "json"
-celery_app.conf.accept_content = ["json"]
-celery_app.conf.timezone = "UTC"
+celery_app.conf.update(
+    task_serializer="json",
+    result_serializer="json",
+    accept_content=["json"],
+    timezone="UTC",
+)
 
 
 @celery_app.task(bind=True, name="run_training_job", max_retries=0)
-def run_training_job(self, job_id: str, config: dict) -> dict:
+def run_training_job(self, job_id: int, config: dict) -> dict:
     """
     Main training entry point.  Runs each topology sequentially.
     """
@@ -49,19 +51,16 @@ def run_training_job(self, job_id: str, config: dict) -> dict:
         _async_run_training(job_id, config)
     )
 
-run_training_job: CeleryTask
 
-
-async def _async_run_training(job_id: str, config: dict) -> dict:
-    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-    from sqlalchemy.orm import sessionmaker
+async def _async_run_training(job_id: int, config: dict) -> dict:
+    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
     from app.models.domain import TrainingJob
     from app.data.pipeline import DataPipeline
     from app.rl.trainer import TrainingOrchestrator
     import redis.asyncio as aioredis
 
     engine = create_async_engine(cfg.postgres_dsn)
-    SessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     redis_client = aioredis.from_url(cfg.redis_url)
 
     hp = config["hyperparams"]

@@ -187,7 +187,7 @@ class TrainingJobResponse(BaseModel):
         }
     })
 
-    job_id: str = Field(description="UUID of the training job — use for status polling and WebSocket streaming")
+    job_id: int = Field(description="ID of the training job — use for status polling and WebSocket streaming")
     status: TrainingStatus
     message: str = Field(default="", description="Human-readable status message")
 
@@ -213,7 +213,7 @@ class TrainingStatusResponse(BaseModel):
         }
     })
 
-    job_id: str
+    job_id: int
     status: TrainingStatus
     step: int = Field(description="Current training step")
     max_steps: int = Field(description="Maximum training steps configured (default 500 000)")
@@ -264,7 +264,7 @@ class DataIngestionRequest(BaseModel):
 
 
 class DataIngestionResponse(BaseModel):
-    job_id: str
+    job_id: str  # legacy data ingestion — keeps str for backward compat
     assets_queued: int
     status: str
 

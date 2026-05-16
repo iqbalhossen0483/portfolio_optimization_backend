@@ -69,7 +69,7 @@ class PortfolioOrchestratorAgent(Agent):
     def __init__(
         self,
         model_store_path: str,
-        job_id: str,
+        job_id: int,
         n_assets: int,
         hidden: int = 256,
     ) -> None:

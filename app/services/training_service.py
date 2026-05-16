@@ -9,7 +9,6 @@ start_training_from_xlsx() — new XLSX multipart path:
     Stage 4: enqueued to Celery (DB-backed sources, frozen normalizer)
 """
 from __future__ import annotations
-import uuid
 from datetime import datetime, date
 from typing import Any
 
@@ -35,9 +34,8 @@ class TrainingService:
 
     # ── Legacy JSON-body path (backward compat) ───────────────────────────────
 
-    async def start_training(self, request: TrainingRequest) -> str:
+    async def start_training(self, request: TrainingRequest) -> int:
         """Create a DB record and enqueue Celery tasks. Returns job_id."""
-        job_id = str(uuid.uuid4())
         topologies = (
             ["cooperative", "competitive", "mixed"]
             if request.topology.value == "all"
@@ -56,7 +54,6 @@ class TrainingService:
         }
 
         job = TrainingJob(
-            id=job_id,
             status="queued",
             portfolio_model=request.portfolio_model.value,
             topology=request.topology.value,
@@ -64,10 +61,12 @@ class TrainingService:
             started_at=None,
         )
         self._db.add(job)
+        await self._db.flush()   # populates job.id from DB autoincrement
+        job_id: int = job.id
         await self._db.commit()
 
         from app.workers.tasks import run_training_job
-        run_training_job.delay(job_id, config)
+        run_training_job.delay(job_id, config)  # type: ignore[union-attr]
 
         log.info("training_job_queued", job_id=job_id, topologies=topologies)
         return job_id
@@ -84,28 +83,25 @@ class TrainingService:
         val_start: date | None,
         val_end: date | None,
         hyperparams: dict,
-    ) -> str:
+    ) -> int:
         from app.data.sources.xlsx import XLSXDataSource
         from app.data.sources.database import DatabaseMarketDataSource, DatabaseESGDataSource
         from app.data.pipeline import DataPipeline
 
-        job_id = str(uuid.uuid4())
-
         # ── Stage 1: Parse XLSX → compute return_pct + macd_hist ─────────────
-        log.info("stage1_start", job_id=job_id, files=len(tmp_paths))
+        log.info("stage1_start", files=len(tmp_paths))
         parsed = XLSXDataSource.parse_files(tmp_paths)
         isins = [a["isin"] for a in parsed.assets]  # N — dynamic from XLSX
 
         await self._upsert_assets(parsed.assets)
         await self._upsert_market_data(parsed.market_df)
         await self._upsert_esg_raw(parsed.esg_df)
-        log.info("stage1_done", job_id=job_id, n_assets=len(isins),
-                 n_timesteps=parsed.n_timesteps)
+        log.info("stage1_done", n_assets=len(isins), n_timesteps=parsed.n_timesteps)
 
         # ── Stage 2: Cross-sectional ESG normalization (per date, all N) ─────
-        log.info("stage2_start", job_id=job_id)
+        log.info("stage2_start")
         await self._compute_esg_normalization(isins)
-        log.info("stage2_done", job_id=job_id)
+        log.info("stage2_done")
 
         # ── Derive date ranges if not supplied ────────────────────────────────
         if None in (train_start, train_end, val_start, val_end):
@@ -114,18 +110,7 @@ class TrainingService:
             )
         assert train_start and train_end and val_start and val_end
 
-        # ── Stage 3: Fit time-series normalizer → persist params ─────────────
-        log.info("stage3_start", job_id=job_id,
-                 train_start=str(train_start), train_end=str(train_end))
-        market_src = DatabaseMarketDataSource(cfg.postgres_dsn)
-        esg_src    = DatabaseESGDataSource(cfg.postgres_dsn)
-        pipeline   = DataPipeline(market_src, esg_src)
-        train_ds   = await pipeline.prepare(isins, train_start, train_end, fit=True)
-        param_records = train_ds.normalizer.to_param_records(job_id, isins)
-        await self._upsert_normalizer_params(param_records)
-        log.info("stage3_done", job_id=job_id, param_rows=len(param_records))
-
-        # ── Create job record + enqueue Celery task (Stage 4) ─────────────────
+        # ── Create job record (must exist before normalizer params FK insert) ───
         topologies = (
             ["cooperative", "competitive", "mixed"]
             if topology == "all"
@@ -143,10 +128,21 @@ class TrainingService:
             "val_end": str(val_end),
             "hyperparams": hyperparams,
         }
-        await self._create_job_record(job_id, portfolio_model, topology, config)
+        job_id: int = await self._create_job_record(portfolio_model, topology, config)
+
+        # ── Stage 3: Fit time-series normalizer → persist params ─────────────
+        log.info("stage3_start", job_id=job_id,
+                 train_start=str(train_start), train_end=str(train_end))
+        market_src = DatabaseMarketDataSource(cfg.postgres_dsn)
+        esg_src    = DatabaseESGDataSource(cfg.postgres_dsn)
+        pipeline   = DataPipeline(market_src, esg_src)
+        train_ds   = await pipeline.prepare(isins, train_start, train_end, fit=True)
+        param_records = train_ds.normalizer.to_param_records(job_id, isins)
+        await self._upsert_normalizer_params(param_records)
+        log.info("stage3_done", job_id=job_id, param_rows=len(param_records))
 
         from app.workers.tasks import run_training_job
-        run_training_job.delay(job_id, config)
+        run_training_job.delay(job_id, config)  # type: ignore[union-attr]
 
         log.info("stage4_queued", job_id=job_id, n_assets=len(isins),
                  topologies=topologies)
@@ -160,13 +156,13 @@ class TrainingService:
             return
         await self._db.execute(
             text("""
-                INSERT INTO assets (id, isin, name, sector)
-                VALUES (:id, :isin, :name, :sector)
+                INSERT INTO assets (isin, name, sector)
+                VALUES (:isin, :name, :sector)
                 ON CONFLICT (isin) DO UPDATE
                     SET name = EXCLUDED.name,
                         sector = EXCLUDED.sector
             """),
-            [{"id": str(uuid.uuid4()), **a} for a in assets],
+            assets,
         )
         await self._db.commit()
 
@@ -189,7 +185,6 @@ class TrainingService:
             if not asset_id:
                 continue
             records.append({
-                "id": str(uuid.uuid4()),
                 "asset_id": asset_id,
                 "date": row.date,
                 "open": _safe_float(row.open),
@@ -208,10 +203,10 @@ class TrainingService:
         await self._db.execute(
             text("""
                 INSERT INTO market_data
-                    (id, asset_id, date, open, high, low, close, volume,
+                    (asset_id, date, open, high, low, close, volume,
                      rsi, return_pct, macd_hist)
                 VALUES
-                    (:id, :asset_id, :date, :open, :high, :low, :close, :volume,
+                    (:asset_id, :date, :open, :high, :low, :close, :volume,
                      :rsi, :return_pct, :macd_hist)
                 ON CONFLICT (asset_id, date) DO UPDATE SET
                     open       = EXCLUDED.open,
@@ -243,7 +238,6 @@ class TrainingService:
             if not asset_id:
                 continue
             records.append({
-                "id": str(uuid.uuid4()),
                 "asset_id": asset_id,
                 "date": row.date,
                 "bloomberg_score": _safe_float(row.bloomberg_score),
@@ -255,8 +249,8 @@ class TrainingService:
 
         await self._db.execute(
             text("""
-                INSERT INTO esg_scores (id, asset_id, date, bloomberg_score, lesg_score)
-                VALUES (:id, :asset_id, :date, :bloomberg_score, :lesg_score)
+                INSERT INTO esg_scores (asset_id, date, bloomberg_score, lesg_score)
+                VALUES (:asset_id, :date, :bloomberg_score, :lesg_score)
                 ON CONFLICT (asset_id, date) DO UPDATE SET
                     bloomberg_score = EXCLUDED.bloomberg_score,
                     lesg_score      = EXCLUDED.lesg_score
@@ -311,7 +305,7 @@ class TrainingService:
         update_records = df[["id", "esg_b_norm", "esg_l_norm",
                               "delta_esg", "mu_esg"]].to_dict(orient="records")
 
-        await self._db.execute(
+        await self._db.execute(  # type: ignore[call-overload]
             text("""
                 UPDATE esg_scores SET
                     esg_b_norm = :esg_b_norm,
@@ -320,7 +314,7 @@ class TrainingService:
                     mu_esg     = :mu_esg
                 WHERE id = :id
             """),
-            update_records,
+            update_records,  # type: ignore[arg-type]
         )
         await self._db.commit()
         log.info("esg_normalization_done", rows=len(update_records))
@@ -331,32 +325,29 @@ class TrainingService:
         """Bulk insert 8×N normalizer param rows (N is dynamic)."""
         if not records:
             return
-        rows = [{"id": str(uuid.uuid4()), **r} for r in records]
         await self._db.execute(
             text("""
                 INSERT INTO training_normalizer_params
-                    (id, job_id, isin, feature_name, min_val, max_val)
-                VALUES (:id, :job_id, :isin, :feature_name, :min_val, :max_val)
+                    (job_id, isin, feature_name, min_val, max_val)
+                VALUES (:job_id, :isin, :feature_name, :min_val, :max_val)
                 ON CONFLICT (job_id, isin, feature_name) DO UPDATE SET
                     min_val = EXCLUDED.min_val,
                     max_val = EXCLUDED.max_val
             """),
-            rows,
+            records,
         )
         await self._db.commit()
-        log.info("normalizer_params_upserted", rows=len(rows))
+        log.info("normalizer_params_upserted", rows=len(records))
 
     # ── Job record helper ─────────────────────────────────────────────────────
 
     async def _create_job_record(
         self,
-        job_id: str,
         portfolio_model: str,
         topology: str,
         config: dict,
-    ) -> None:
+    ) -> int:
         job = TrainingJob(
-            id=job_id,
             status="queued",
             portfolio_model=portfolio_model,
             topology=topology,
@@ -364,11 +355,14 @@ class TrainingService:
             started_at=None,
         )
         self._db.add(job)
+        await self._db.flush()   # populates job.id from DB autoincrement
+        job_id: int = job.id
         await self._db.commit()
+        return job_id
 
     # ── Status / stop ─────────────────────────────────────────────────────────
 
-    async def get_status(self, job_id: str) -> dict[str, Any]:
+    async def get_status(self, job_id: int) -> dict[str, Any]:
         from sqlalchemy import select
         result = await self._db.execute(
             select(TrainingJob).where(TrainingJob.id == job_id)
@@ -396,7 +390,7 @@ class TrainingService:
             "error_message": job.error_message,
         }
 
-    async def stop_training(self, job_id: str) -> bool:
+    async def stop_training(self, job_id: int) -> bool:
         """Signal the Celery worker to stop the job gracefully."""
         if self._redis:
             await self._redis.set(f"stop:{job_id}", "1", ex=3600)

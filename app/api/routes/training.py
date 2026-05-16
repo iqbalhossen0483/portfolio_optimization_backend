@@ -35,8 +35,7 @@ _VALID_TOPOLOGIES = {t.value for t in Topology}
         "plus training configuration as multipart form fields.\n\n"
         "**Stages 1–3** run synchronously before the response is returned:\n"
         "1. Parse XLSX → compute `return_pct` (pct_change of Close) and `macd_hist` "
-        "(MACD histogram from Close using `macd_fast/slow/signal` from config). "
-        "RSI is taken **directly from the file** — not recomputed. "
+        "(MACD histogram from Close using `macd_fast/slow/signal` from config) "
         "→ bulk-upsert to `assets`, `market_data`, `esg_scores`\n"
         "2. Cross-sectional ESG normalisation per date across all N ISINs: "
         "`esg_b_norm`, `esg_l_norm`, `delta_esg = |b-l|`, `mu_esg = (b+l)/2` "
@@ -205,7 +204,7 @@ async def start_training(
     },
 )
 async def get_training_status(
-    job_id: str,
+    job_id: int,
     service: TrainingService = Depends(get_training_service),
 ) -> TrainingStatusResponse:
     data = await service.get_status(job_id)
@@ -230,7 +229,7 @@ async def get_training_status(
     },
 )
 async def stop_training(
-    job_id: str,
+    job_id: int,
     service: TrainingService = Depends(get_training_service),
 ) -> dict:
     ok = await service.stop_training(job_id)

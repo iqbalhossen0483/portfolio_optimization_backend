@@ -13,12 +13,10 @@ Training parameters (from spec):
 For each topology, a separate Trainer + MASAC instance is created.
 """
 from __future__ import annotations
-import asyncio
 import json
 import os
 import time
 from collections import deque
-from typing import AsyncIterator
 
 import numpy as np
 import structlog
@@ -40,7 +38,7 @@ class TrainingOrchestrator:
 
     def __init__(
         self,
-        job_id: str,
+        job_id: int,
         dataset: ProcessedDataset,
         portfolio_model: str,
         topology: str,

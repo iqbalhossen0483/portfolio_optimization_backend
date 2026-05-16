@@ -1,0 +1,77 @@
+# Dev compose — merge with docker-compose.yml:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+#
+# What changes vs production:
+#   - Uses Dockerfile.development (BuildKit cache, watchfiles, debugpy)
+#   - ./app mounted as live volume → no rebuild needed after code changes
+#   - uvicorn --reload → API restarts automatically on .py save
+#   - Celery loglevel=debug, concurrency=1
+#   - debugpy on port 5678 for IDE remote debugger attach
+#   - DEBUG=true, LOG_LEVEL=DEBUG
+#   - No memory/CPU limits
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.development
+    command:
+      - python
+      - -m
+      - debugpy
+      - --listen
+      - "0.0.0.0:5678"
+      - -m
+      - uvicorn
+      - app.main:app
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - --reload
+      - --reload-dir
+      - /app/app
+      - --workers
+      - "1"
+    ports:
+      - "8000:8000"
+      - "5678:5678" # debugpy — attach VS Code / PyCharm here
+    volumes:
+      - model_store:/app/model_store
+      - ./app:/app/app # live mount — changes visible instantly, no rebuild
+    environment:
+      DEBUG: "true"
+      LOG_LEVEL: DEBUG
+      WATCHFILES_FORCE_POLLING: "true"
+    deploy:
+      resources: {} # remove production limits
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.development
+    command:
+      - celery
+      - -A
+      - app.workers.tasks
+      - worker
+      - --loglevel=debug
+      - --concurrency=1
+      # Windows: add --pool=solo if prefork causes issues inside WSL2
+    volumes:
+      - model_store:/app/model_store
+      - ./app:/app/app # task code changes picked up on next task execution
+    environment:
+      DEBUG: "true"
+      LOG_LEVEL: DEBUG
+    deploy:
+      resources: {}
+
+  beat:
+    build:
+      context: .
+      dockerfile: Dockerfile.development
+    volumes:
+      - ./app:/app/app
+    deploy:
+      resources: {}

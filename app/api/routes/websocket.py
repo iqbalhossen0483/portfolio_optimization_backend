@@ -19,7 +19,7 @@ router = APIRouter(prefix="/ws", tags=["websocket"])
 @router.websocket("/training/{job_id}")
 async def training_stream(
     websocket: WebSocket,
-    job_id: str,
+    job_id: int,
     redis_client=Depends(get_redis),
 ) -> None:
     """

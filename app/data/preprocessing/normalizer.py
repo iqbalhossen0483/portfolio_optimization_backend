@@ -6,8 +6,7 @@ Min-Max normalization with two distinct axes per the workflow spec:
 """
 from __future__ import annotations
 import numpy as np
-import pandas as pd
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -41,16 +40,26 @@ class TimeSeriesNormalizer:
     def is_fitted(self) -> bool:
         return self._scaler is not None
 
-    def fit(self, data: np.ndarray) -> TimeSeriesNormalizer:
+    def fit(self, data: np.ndarray) -> "TimeSeriesNormalizer":
         """
         data: (T_train, N)
         Computes min/max per asset (axis=0 → across time for each asset).
         """
         assert data.ndim == 2, "Expected (T, N)"
-        mins = data.min(axis=0)   # (N,)
-        maxs = data.max(axis=0)   # (N,)
+        mins = np.nanmin(data, axis=0)   # (N,) — NaN-safe
+        maxs = np.nanmax(data, axis=0)   # (N,) — NaN-safe
         self._scaler = FrozenScaler(mins=mins, maxs=maxs)
         return self
+
+    @property
+    def mins(self) -> np.ndarray:
+        assert self._scaler is not None, "Scaler not fitted"
+        return self._scaler.mins
+
+    @property
+    def maxs(self) -> np.ndarray:
+        assert self._scaler is not None, "Scaler not fitted"
+        return self._scaler.maxs
 
     def transform(self, data: np.ndarray) -> np.ndarray:
         """data: (T, N) → (T, N) normalized."""
@@ -185,7 +194,7 @@ class DataNormalizer:
             result[key + "_norm"] = self._ts_scalers[key].transform(market_data[key])
         return result
 
-    def to_param_records(self, job_id: str, isins: list[str]) -> list[dict]:
+    def to_param_records(self, job_id: int, isins: list[str]) -> list[dict]:
         """
         Exports frozen min/max scalers as flat dicts ready for bulk-insert into
         training_normalizer_params table.  Returns 8 × N records (N = len(isins)).
@@ -202,13 +211,13 @@ class DataNormalizer:
                     "job_id": job_id,
                     "isin": isin,
                     "feature_name": feat,
-                    "min_val": float(scaler._scaler.mins[j]),
-                    "max_val": float(scaler._scaler.maxs[j]),
+                    "min_val": float(scaler.mins[j]),
+                    "max_val": float(scaler.maxs[j]),
                 })
         return records
 
     @classmethod
-    async def load_from_db(cls, job_id: str, dsn: str) -> "DataNormalizer":
+    async def load_from_db(cls, job_id: int, dsn: str) -> "DataNormalizer":
         """
         Reconstructs a frozen DataNormalizer from training_normalizer_params rows.
         N is derived dynamically from the number of distinct ISINs in the table.
@@ -229,7 +238,7 @@ class DataNormalizer:
                     """),
                     {"job_id": job_id},
                 )
-                df = pd.DataFrame(rows.fetchall(), columns=rows.keys())
+                df = pd.DataFrame(rows.fetchall(), columns=list(rows.keys()))
         finally:
             await engine.dispose()
 

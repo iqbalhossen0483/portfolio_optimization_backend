@@ -1,44 +1,84 @@
 # MADRL Portfolio System
 
-A **Multi-Agent Deep Reinforcement Learning** portfolio optimization system that resolves ESG rating disagreement between Bloomberg and LESG through a three-agent MASAC framework. The system runs three game-theoretic topologies — Cooperative, Competitive, and Mixed — concurrently for every query and returns side-by-side portfolio panels for comparison.
+Multi-Agent Deep Reinforcement Learning portfolio optimisation that resolves ESG rating disagreement between Bloomberg and LESG through a three-agent MASAC framework. Three game-theoretic topologies — Cooperative, Competitive, and Mixed — run concurrently and return side-by-side portfolio panels for direct comparison.
+
+**Stack:** FastAPI · PyTorch MASAC · PostgreSQL · Redis · Celery · Google ADK · Docker
 
 ---
 
-## Architecture at a Glance
+## Table of Contents
+
+1. [Architecture](#architecture)
+2. [Prerequisites](#prerequisites)
+3. [Getting Started — Production](#getting-started--production)
+4. [Getting Started — Development](#getting-started--development)
+5. [Database Migrations](#database-migrations)
+6. [API Usage](#api-usage)
+   - [Training Workflow](#training-workflow)
+   - [Monitor Training](#monitor-training)
+   - [Generate Portfolio](#generate-portfolio)
+7. [Configuration](#configuration)
+8. [Project Structure](#project-structure)
+9. [Design Decisions](#design-decisions)
+10. [Testing](#testing)
+11. [Operations](#operations)
+
+---
+
+## Architecture
 
 ```
-User Query
-    │
-    ▼
-FastAPI  ──►  PortfolioOrchestratorAgent (Google ADK)
-                  │         │         │
-             Bloomberg   LESG      Financial
-             ESGAgent    ESGAgent   Agent
-                  │         │         │
-                  └────┬────┘         │
-                  z_joint = avg(z^B, z^L, z^F)
-                  Softmax → portfolio weights
-                  │
-          ┌───────┼───────┐
-     Cooperative Competitive Mixed    ← three panels returned simultaneously
+POST /training/start (.xlsx files)
+         │
+         ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Stage 1  Parse XLSX → compute return_pct + macd_hist       │
+│           → bulk upsert: assets, market_data, esg_scores    │
+├─────────────────────────────────────────────────────────────┤
+│  Stage 2  Cross-sectional ESG normalisation per date        │
+│           esg_b_norm, esg_l_norm, delta_esg, mu_esg         │
+│           → update esg_scores                               │
+├─────────────────────────────────────────────────────────────┤
+│  Stage 3  Fit time-series normaliser on training window     │
+│           → insert training_normalizer_params (8 × N rows)  │
+└─────────────────────────────────────────────────────────────┘
+         │
+         └── Celery ──► Stage 4: MASAC Training
+                              │
+                    ┌─────────┼─────────┐
+               Cooperative Competitive Mixed
+                    │         │         │
+               Bloomberg   LESG    Financial
+               ESGAgent  ESGAgent   Agent
+                    │         │         │
+                    └────┬────┘─────────┘
+                    z_joint = avg(z^B, z^L, z^F)
+                    Softmax → portfolio weights
 ```
 
-**Stack:** FastAPI · Google ADK · PyTorch MASAC · PostgreSQL · Redis · Celery
+**State vector per timestep:** `10N` features — `[OHLCV(5N) | RSI(N) | MACD(N) | Return(N) | ΔESG(N) | μESG(N)]`
+**N** (number of assets) and **T** (timesteps) are always dynamic — derived from the uploaded XLSX, never hardcoded.
+
+| Topology | β penalty | Behaviour |
+|---|---|---|
+| Cooperative | full β | Penalises ESG-ambiguous assets — conservative, ESG-aligned |
+| Competitive | β = 0 | Each agent maximises its own ESG source — divergent weights |
+| Mixed | partial β | Balanced between cooperation and competition |
 
 ---
 
 ## Prerequisites
 
-| Requirement             | Minimum Version               |
-| ----------------------- | ----------------------------- |
-| Python                  | 3.11                          |
-| Docker & Docker Compose | Docker 24                     |
-| Git                     | any                           |
-| NVIDIA GPU _(optional)_ | CUDA 12.x for faster training |
+| Requirement | Version |
+|---|---|
+| Docker & Docker Compose | Docker 24+ |
+| Python | 3.11+ (dev only) |
+| Git | any |
+| NVIDIA GPU | optional — CUDA 12.x for faster training |
 
 ---
 
-## Quick Start — Docker (Recommended)
+## Getting Started — Production
 
 ### 1. Clone and configure
 
@@ -46,35 +86,39 @@ FastAPI  ──►  PortfolioOrchestratorAgent (Google ADK)
 git clone <repo-url> madrl_portfolio
 cd madrl_portfolio
 
-cp .env.example .env
+cp .env.example .env.docker
 ```
 
-Open `.env` and fill in at minimum:
+Edit `.env.docker` — minimum required:
 
 ```env
-GOOGLE_API_KEY=your_google_api_key_here   # required for ADK agents
+POSTGRES_DSN=postgresql+asyncpg://<user>:<pass>@host.docker.internal:5432/madrl_portfolio
+REDIS_PASSWORD=your_redis_password
+GOOGLE_API_KEY=your_google_api_key
 ```
 
-All other values default to the Docker service names and are pre-wired in `docker-compose.yml`.
-
-### 2. Start all services
+### 2. Build and start
 
 ```bash
-docker compose up --build
+docker compose up --build -d
 ```
 
-This starts:
+| Service | URL |
+|---|---|
+| API | http://localhost:8000 |
+| Swagger UI | http://localhost:8000/docs |
+| ReDoc | http://localhost:8000/redoc |
+| Flower (Celery monitor) | http://localhost:5555 |
+| Prometheus | http://localhost:9090 |
 
-| Service                     | URL                         |
-| --------------------------- | --------------------------- |
-| **API**                     | http://localhost:8000       |
-| **Swagger docs**            | http://localhost:8000/docs  |
-| **ReDoc**                   | http://localhost:8000/redoc |
-| **Flower** (Celery monitor) | http://localhost:5555       |
-| **Prometheus**              | http://localhost:9090       |
-| Redis                       | localhost:6379              |
+### 3. Apply database migrations
 
-### 3. Verify the API is running
+```bash
+# Run inside the api container
+docker compose exec api alembic upgrade head
+```
+
+### 4. Verify
 
 ```bash
 curl http://localhost:8000/health
@@ -83,178 +127,125 @@ curl http://localhost:8000/health
 
 ---
 
-## Local Development Setup
+## Getting Started — Development
 
-This project uses [uv](https://docs.astral.sh/uv/) for dependency management.
-Services are split between `uv run` (Python processes) and Docker (infrastructure).
+Development mode mounts `./app` as a live volume — **no image rebuild after code changes**. Uvicorn reloads automatically on every `.py` save. `debugpy` is available on port `5678` for IDE attachment.
 
-### Service map
+Two files handle this:
 
-| Service           | How to run | URL                   |
-| ----------------- | ---------- | --------------------- |
-| **FastAPI**       | `uv run`   | http://localhost:8000 |
-| **Celery worker** | `uv run`   | —                     |
-| **Flower**        | `uv run`   | http://localhost:5555 |
-| **Redis**         | Docker     | localhost:6379        |
-| **Prometheus**    | Docker     | http://localhost:9090 |
+| File | Purpose |
+|---|---|
+| `Dockerfile.development` | Dev image: BuildKit pip cache, `watchfiles`, `debugpy` |
+| `docker-compose.dev.yml` | Overrides: live volume, `--reload`, debug port, no resource limits |
 
-> Prometheus runs in Docker but scrapes the `uv`-hosted API on your machine via
-> `host.docker.internal:8000` — no special config needed.
-
----
-
-### 1. Install uv (if not already installed)
+### 1. Start dev stack
 
 ```bash
-# Windows (PowerShell)
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+# First time — builds the dev image
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 
-# macOS / Linux
-curl -LsSf https://astral.sh/uv/install.sh | sh
+# All subsequent starts — no rebuild needed
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up
 ```
 
-### 2. Install all dependencies
+| Service | URL |
+|---|---|
+| API + Swagger | http://localhost:8000/docs |
+| Flower | http://localhost:5555 |
+| Prometheus | http://localhost:9090 |
+| debugpy (IDE attach) | localhost:5678 |
+
+### 2. Apply migrations
 
 ```bash
-uv sync
-uv sync --group dev      # include dev/test dependencies
+docker compose -f docker-compose.yml -f docker-compose.dev.yml exec api alembic upgrade head
 ```
 
-`uv sync` reads `pyproject.toml`, creates `.venv` automatically, installs all
-packages, and registers the `app` package in editable mode — no separate
-`pip install -e .` step needed.
+### 3. Live reload
 
-### 3. Configure environment
-
-```bash
-cp .env.example .env
+```
+Save any file in app/  →  watchfiles detects change  →  uvicorn reloads  →  new code live
 ```
 
-Minimum required `.env` settings for local development:
+> **Windows / Docker Desktop:** `WATCHFILES_FORCE_POLLING=true` is pre-set in `Dockerfile.development`. WSL2 bind mounts do not reliably deliver inotify events — polling ensures reload always works.
 
-```env
-POSTGRES_DSN=postgresql+asyncpg://madrl:madrl@localhost:5432/madrl_portfolio
-REDIS_URL=redis://localhost:6379/0
-CELERY_BROKER_URL=redis://localhost:6379/1
-CELERY_RESULT_BACKEND=redis://localhost:6379/2
-GOOGLE_API_KEY=your_google_api_key_here
-MODEL_STORE_PATH=./model_store
+### Rebuild reference
+
+| What changed | Action |
+|---|---|
+| Any `app/` file | Nothing — volume mount, instant |
+| `requirements.txt` | `docker compose … up --build` — pip cache on host makes it fast |
+| `Dockerfile.development` | `docker compose … up --build` |
+| Base image / system deps | `docker compose … up --build --no-cache` |
+
+### VS Code remote debugger
+
+Add to `.vscode/launch.json`:
+
+```json
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Docker: Attach",
+      "type": "debugpy",
+      "request": "attach",
+      "connect": { "host": "localhost", "port": 5678 },
+      "pathMappings": [
+        { "localRoot": "${workspaceFolder}/app", "remoteRoot": "/app/app" }
+      ]
+    }
+  ]
+}
 ```
 
-### 4. Start infrastructure services (Docker)
-
-```bash
-docker compose up -d
-```
-
-This starts PostgreSQL, Redis, and Prometheus. Prometheus will immediately begin
-scraping http://host.docker.internal:8000/metrics — it retries automatically
-until the API is up.
-
-### 5. Start the API server
-
-Open a terminal in the project root and run:
-
-```bash
-uv run uvicorn app.main:app --reload --port 8000
-```
-
-### 6. Start the Celery worker
-
-Open a second terminal in the project root:
-
-```bash
-# Windows
-uv run celery -A celery_app worker --loglevel=info --pool=solo
-
-# macOS / Linux
-uv run celery -A celery_app worker --loglevel=info --concurrency=2
-```
-
-> **Windows note:** The default `prefork` pool uses `os.fork()` which is not available
-> on Windows. Use `--pool=solo` for local development.
-
-### 7. Start Flower (Celery monitor)
-
-Open a third terminal in the project root:
-
-```bash
-uv run celery -A celery_app flower --port=5555
-```
-
-### All services at a glance
-
-| Terminal | Command                                                          | Opens                |
-| -------- | ---------------------------------------------------------------- | -------------------- |
-| 1        | `uv run uvicorn app.main:app --reload --port 8000`               | API + Swagger        |
-| 2        | `uv run celery -A celery_app worker --loglevel=info --pool=solo` | Worker               |
-| 3        | `uv run celery -A celery_app flower --port=5555`                 | Flower UI            |
-| Docker   | `docker compose up postgres redis prometheus -d`                 | DB + Cache + Metrics |
+Set a breakpoint → press **F5**. Attaches to the running container without restarting it.
 
 ---
 
 ## Database Migrations
 
-The project uses **Alembic** for schema migrations. Run these after any change to `app/models/domain.py` or on first setup.
+Migrations are managed with **Alembic**. The `alembic/env.py` reads `POSTGRES_DSN` from `app/config.py` directly — no URL in `alembic.ini`. Alembic runs in async mode (asyncpg).
 
-### First-time setup
+### Common commands
 
 ```bash
-# Activate the virtual environment first
-.venv\Scripts\Activate.ps1          # Windows
-source .venv/bin/activate           # macOS / Linux
-
-# Generate a migration from the current ORM models
-alembic revision --autogenerate -m "add computed features columns and normalizer params table"
-
-# Apply the migration to the database
+# Apply all pending migrations (run after every pull)
 alembic upgrade head
+
+# Generate a new migration after changing app/models/domain.py
+alembic revision --autogenerate -m "describe what changed"
+
+# Roll back one migration
+alembic downgrade -1
+
+# Roll back everything (empty schema)
+alembic downgrade base
+
+# Check current revision
+alembic current
+
+# View full history
+alembic history
 ```
 
-### Common Alembic commands
-
-| Command                                            | What it does                                         |
-| -------------------------------------------------- | ---------------------------------------------------- |
-| `alembic upgrade head`                             | Apply all pending migrations (run after every pull)  |
-| `alembic revision --autogenerate -m "description"` | Generate a new migration from ORM model changes      |
-| `alembic downgrade -1`                             | Roll back the last migration                         |
-| `alembic downgrade base`                           | Roll back all migrations (empty schema)              |
-| `alembic current`                                  | Show which migration revision the DB is currently at |
-| `alembic history`                                  | List all migration revisions                         |
-
-> **Note:** Alembic reads the database URL from `app/config.py` (via `POSTGRES_DSN` in `.env`).
-> Make sure PostgreSQL is running before executing any migration command.
+> PostgreSQL must be running before any migration command.
 
 ---
 
-## Running the System
+## API Usage
 
-### Step 1 — Ingest market and ESG data
+Full interactive docs at **http://localhost:8000/docs**.
 
-```bash
-curl -X POST http://localhost:8000/api/v1/data/ingest \
-  -H "Content-Type: application/json" \
-  -d '{
-    "assets": ["AAPL", "XOM", "JNJ", "HSBA.L"],
-    "start_date": "2018-01-01",
-    "end_date": "2024-12-31",
-    "sources": ["market", "bloomberg", "lesg"]
-  }'
-```
+### Training Workflow
 
-> **Note:** Without API keys for Bloomberg and LESG, the system uses deterministic synthetic ESG data automatically. Set `BLOOMBERG_API_KEY` and `LESG_API_KEY` in `.env` to switch to live data.
+Training is a 4-stage pipeline triggered by a single multipart `POST`. Stages 1–3 run synchronously; Stage 4 (MASAC) runs in Celery and returns immediately with a `job_id`.
 
----
-
-### Step 2 — Train MASAC agents
-
-Upload one or more `.xlsx` files in `Stock_ESG_Dataset` format together with the training configuration as multipart form fields.
-Stages 1–3 (parse → DB upsert → ESG normalization → normalizer fit) run synchronously and return a `job_id` immediately.
-Stage 4 (MASAC training) is enqueued to Celery and runs in the background.
+#### Upload XLSX and start training
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/training/start \
-  -F "files=@/path/to/stock_esg_dataset.xlsx" \
+  -F "files=@stock_esg_dataset.xlsx" \
   -F "portfolio_model=C" \
   -F "topology=all" \
   -F "train_start=2018-01-01" \
@@ -262,10 +253,17 @@ curl -X POST http://localhost:8000/api/v1/training/start \
   -F "val_start=2023-01-01" \
   -F "val_end=2023-12-31" \
   -F 'hyperparams_json={"alpha_1":0.5,"alpha_2":0.5,"alpha_3":0.01,"beta":0.3,"lam":0.4}'
-# Returns: {"job_id": "uuid", "status": "queued", "message": "Stages 1-3 complete. MASAC training queued."}
 ```
 
-**Upload multiple files** (e.g. different date ranges or asset sets — deduplicated automatically):
+```json
+{
+  "job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "status": "queued",
+  "message": "Stages 1-3 complete. MASAC training queued."
+}
+```
+
+**Upload multiple files** — different ISINs or date ranges are merged and deduplicated on `(ISIN, Date)`:
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/training/start \
@@ -273,68 +271,87 @@ curl -X POST http://localhost:8000/api/v1/training/start \
   -F "files=@dataset_2021_2024.xlsx" \
   -F "portfolio_model=C" \
   -F "topology=all"
-  # train/val dates auto-derived from file contents at 80/20 split if omitted
+  # omit dates → auto-split 80/20 from file contents
 ```
 
-**XLSX format** (sheet name must be `Stock_ESG_Dataset`):
+**XLSX format** — sheet name must be `Stock_ESG_Dataset`:
 
-| Column                      | Type   | Notes                                               |
-| --------------------------- | ------ | --------------------------------------------------- |
-| `Date`                      | date   | Trading date                                        |
-| `ISIN`                      | string | Asset identifier                                    |
-| `Company name`              | string | —                                                   |
-| `Sector`                    | string | —                                                   |
-| `Open / High / Low / Close` | float  | Raw OHLCV                                           |
-| `Volume`                    | string | Accepts `10.5M`, `2.3K`, `1B`, `1T` or plain number |
-| `RSI`                       | float  | Pre-computed — used as-is, not recomputed           |
-| `Bloom. ESG (0-100)`        | float  | Bloomberg ESG score                                 |
-| `LESG ESG (0-10)`           | float  | LESG ESG score                                      |
+| Column | Type | Notes |
+|---|---|---|
+| `Date` | date | Trading date |
+| `ISIN` | string | Asset identifier — N derived from distinct ISINs |
+| `Company name` | string | |
+| `Sector` | string | |
+| `Open`, `High`, `Low`, `Close` | float | Raw OHLCV — stored as-is |
+| `Volume` | string / float | Accepts `10.5M`, `2.3K`, `1B`, `1T` or plain number |
+| `RSI` | float | RSI value |
+| `Bloom. ESG (0-100)` | float | Bloomberg ESG score |
+| `LESG ESG (0-10)` | float | LESG ESG score |
 
 **Portfolio models:**
 
-| Model | Description                                                         |
-| ----- | ------------------------------------------------------------------- |
-| `A`   | ESG consensus — tests whether Bloomberg + LESG consensus adds alpha |
-| `B`   | Signed disagreement — each agent bets its own ESG source is correct |
-| `C`   | Full model — consensus + uncertainty penalty (recommended)          |
-
-**Topology options:** `cooperative` · `competitive` · `mixed` · `all` (trains all three)
+| Model | Reward structure |
+|---|---|
+| `A` | ESG consensus: `α₁·ESG_B_norm + α₂·ESG_L_norm + financial_return` |
+| `B` | Signed disagreement: each agent bets its own ESG source is correct |
+| `C` | Full model: consensus + `β·ΔESGᵢₜ` uncertainty penalty **(recommended)** |
 
 ---
 
-### Step 3 — Monitor training progress
+### Monitor Training
 
-#### Poll via REST
+#### Poll status
 
 ```bash
 curl http://localhost:8000/api/v1/training/{job_id}/status
 ```
 
+```json
+{
+  "job_id": "3fa85f64-...",
+  "status": "running",
+  "step": 45000,
+  "max_steps": 500000,
+  "progress_pct": 9.0,
+  "best_sharpe": 1.31,
+  "best_mu_esg": 0.68,
+  "elapsed_seconds": 183.4
+}
+```
+
+**Status values:** `queued` → `running` → `completed` / `failed` / `stopped`
+
 #### Stream via WebSocket
 
 ```bash
-# Using wscat (npm install -g wscat)
+# npm install -g wscat
 wscat -c ws://localhost:8000/ws/training/{job_id}
 ```
 
-Messages streamed every 500 steps:
-
 ```json
-{"type": "step", "step": 12500, "entropy": 2.8, "entropy_rolling_std": 0.045, "reward_bloomberg": 0.018, "reward_lesg": 0.014, "reward_financial": 0.021}
-{"type": "converged", "step": 234100, "final_sharpe": 1.44, "mu_esg": 0.71}
+{"type":"step","step":12500,"entropy":2.8,"entropy_rolling_std":0.045,"reward_bloomberg":0.018,"reward_lesg":0.014,"reward_financial":0.021}
+{"type":"converged","step":234100,"final_sharpe":1.44,"mu_esg":0.71}
 ```
 
-Training stops automatically when the rolling standard deviation of mean policy entropy (100-step window) falls below **0.01**, or at **500,000 steps** maximum.
+Training stops when the 100-step rolling std of mean policy entropy drops below **0.01**, or at **500,000 steps** maximum.
+
+#### Stop a running job
+
+```bash
+curl -X POST http://localhost:8000/api/v1/training/{job_id}/stop
+```
+
+The worker finishes the current topology cleanly before exiting.
 
 ---
 
-### Step 4 — Generate a portfolio
+### Generate Portfolio
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/portfolio/generate \
   -H "Content-Type: application/json" \
   -d '{
-    "assets": ["AAPL", "XOM", "JNJ", "HSBA.L"],
+    "assets": ["GB0002875804", "US0378331005", "US30231G1022", "GB0005405286"],
     "portfolio_model": "C",
     "allocation_amount": 10000000,
     "hyperparams": {
@@ -347,7 +364,7 @@ curl -X POST http://localhost:8000/api/v1/portfolio/generate \
   }'
 ```
 
-The response returns **three independent panels** simultaneously:
+Returns three independent panels simultaneously:
 
 ```json
 {
@@ -355,18 +372,33 @@ The response returns **three independent panels** simultaneously:
   "cooperative": {
     "topology": "cooperative",
     "portfolio": [
-      {"isin": "AAPL", "sector": "Tech", "weight": 0.40, "allocation": 4000000,
-       "return_ann": 0.22, "risk_ann": 0.12, "sharpe": 1.83, "mu_esg": 0.93, "delta_esg": 0.14}
+      {
+        "isin": "GB0002875804",
+        "sector": "Financials",
+        "weight": 0.40,
+        "allocation": 4000000,
+        "return_ann": 0.22,
+        "risk_ann": 0.12,
+        "sharpe": 1.83,
+        "mu_esg": 0.93,
+        "delta_esg": 0.14
+      }
     ],
-    "aggregate_metrics": {"portfolio_sharpe": 1.36, "portfolio_mu_esg": 0.72, ...},
+    "aggregate_metrics": {
+      "portfolio_sharpe": 1.36,
+      "portfolio_mu_esg": 0.72,
+      "portfolio_delta_esg": 0.11,
+      "portfolio_return": 0.19,
+      "portfolio_risk": 0.14
+    },
     "strategic_summary": "Cooperative mode: shared ESG ambiguity penalty β=0.30 ..."
   },
-  "competitive": { ... },
-  "mixed": { ... }
+  "competitive": { "..." },
+  "mixed": { "..." }
 }
 ```
 
-#### Retrieve a previous comparison
+Retrieve a stored comparison:
 
 ```bash
 curl http://localhost:8000/api/v1/portfolio/{query_id}/comparison
@@ -374,42 +406,40 @@ curl http://localhost:8000/api/v1/portfolio/{query_id}/comparison
 
 ---
 
-## Hyperparameter Reference
+## Configuration
 
-| Parameter | Default | Range        | Role                                                 |
-| --------- | ------- | ------------ | ---------------------------------------------------- |
-| `alpha_1` | `0.5`   | `[0.1, 1.0]` | Bloomberg ESG weight in reward (Portfolios A, C)     |
-| `alpha_2` | `0.5`   | `[0.1, 1.0]` | LESG ESG weight in reward (Portfolios A, C)          |
-| `alpha_3` | `0.01`  | `≈ 0`        | Financial agent ESG bias (negligible by design)      |
-| `beta`    | `0.3`   | `[0.1, 1.0]` | Shared ambiguity penalty strength (Portfolio C only) |
-| `lam`     | `0.4`   | `[0.1, 1.0]` | Signed disagreement sensitivity (Portfolio B only)   |
+### Environment variables
 
-Hyperparameters are selected via grid search on the validation period using **Sharpe Ratio** as the primary metric and **μESG** as a secondary constraint. They are not learned — they encode investor preference before training.
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `POSTGRES_DSN` | yes | — | Async PostgreSQL DSN (`postgresql+asyncpg://...`) |
+| `REDIS_URL` | yes | — | Redis URL for cache and PubSub |
+| `REDIS_PASSWORD` | yes | — | Redis auth password |
+| `CELERY_BROKER_URL` | yes | — | Celery broker (Redis DB 1) |
+| `CELERY_RESULT_BACKEND` | yes | — | Celery results (Redis DB 2) |
+| `GOOGLE_API_KEY` | yes | — | Google AI key for ADK agents |
+| `ADK_MODEL` | no | `gemini-2.0-flash` | ADK LLM model |
+| `BLOOMBERG_API_KEY` | no | `""` | Bloomberg ESG API — stub data if empty |
+| `LESG_API_KEY` | no | `""` | LESG API — stub data if empty |
+| `MODEL_STORE_PATH` | no | `./model_store` | Directory for trained actor/critic weights |
+| `DEBUG` | no | `false` | Enables SQLAlchemy query logging |
+| `MASAC_MAX_STEPS` | no | `500000` | Maximum training steps per topology |
+| `MASAC_BATCH_SIZE` | no | `256` | Replay buffer sample size |
+| `MASAC_HIDDEN_SIZE` | no | `256` | Hidden layer width for Actor and Critic MLPs |
+| `MASAC_LR_ACTOR` | no | `3e-4` | Actor learning rate |
+| `MASAC_LR_CRITIC` | no | `3e-4` | Critic learning rate |
 
----
+### Hyperparameters
 
-## Running Tests
+Hyperparameters are **not learned** — they encode investor preference before training. Selected via grid search on the validation window using Sharpe as primary metric and μESG as secondary.
 
-```bash
-# All tests
-uv run pytest tests/ -v
-
-# With coverage report
-uv run pytest tests/ -v --cov=app --cov-report=term-missing
-
-# Individual test modules
-uv run pytest tests/test_normalizer.py -v    # Data normalization (no-leakage checks)
-uv run pytest tests/test_masac.py -v         # Actor/Critic networks, replay buffer, update step
-uv run pytest tests/test_environment.py -v   # Reward functions, topology β differences
-```
-
-Expected output summary:
-
-```
-tests/test_normalizer.py   ......   6 passed
-tests/test_masac.py        ......   6 passed
-tests/test_environment.py  ......   6 passed
-```
+| Parameter | Default | Range | Role |
+|---|---|---|---|
+| `alpha_1` | `0.5` | `[0.0, 1.0]` | Bloomberg ESG weight in reward (Portfolios A, C) |
+| `alpha_2` | `0.5` | `[0.0, 1.0]` | LESG ESG weight in reward (Portfolios A, C) |
+| `alpha_3` | `0.01` | `[0.0, 0.1]` | Financial agent ESG bias — kept near 0 by design |
+| `beta` | `0.3` | `[0.0, 1.0]` | Ambiguity penalty strength `β·ΔESGᵢₜ` (Portfolio C, Cooperative topology) |
+| `lam` | `0.4` | `[0.0, 1.0]` | Signed disagreement sensitivity (Portfolio B) |
 
 ---
 
@@ -418,141 +448,147 @@ tests/test_environment.py  ......   6 passed
 ```
 madrl_portfolio/
 ├── app/
-│   ├── main.py                     # FastAPI app factory + startup/shutdown
-│   ├── config.py                   # Pydantic Settings — All env-var settings (DB URL, Redis, etc.)
+│   ├── main.py                        # FastAPI factory, lifespan, middleware, routers
+│   ├── config.py                      # Pydantic Settings — all env-var bindings
 │   │
-│   ├── api/                        # HTTP layer — routing, request/response only
-│   │   ├── deps.py                 # Shared dependencies (DB session, Redis, auth)
+│   ├── api/
+│   │   ├── deps.py                    # DB session, Redis, service dependencies
 │   │   └── routes/
-│   │       ├── portfolio.py        # POST /portfolio/generate, GET /portfolio/{id}/comparison
-│   │       ├── training.py         # POST /training/start, GET /training/{id}/status
-│   │       ├── data.py             # POST /data/ingest, GET /data/assets
-│   │       └── websocket.py        # WS /ws/training/{id}, WS /ws/portfolio/{id}
+│   │       ├── portfolio.py           # POST /portfolio/generate, GET /portfolio/{id}/comparison
+│   │       ├── training.py            # POST /training/start (multipart), GET/POST /training/{id}/*
+│   │       ├── data.py                # GET /data/assets, POST /data/ingest
+│   │       └── websocket.py           # WS /ws/training/{id}, WS /ws/portfolio/{id}
 │   │
-│   ├── services/                   # Business logic layer — orchestrates agents + data
-│   │   ├── portfolio_service.py    # Portfolio generation business logic
-│   │   └── training_service.py     # Training job lifecycle management
+│   ├── services/
+│   │   ├── training_service.py        # 4-stage XLSX pipeline + Celery job lifecycle
+│   │   └── portfolio_service.py       # Portfolio generation orchestration
 │   │
-│   ├── agents/                     # Multi-agent decision-making (Google ADK)
-│   │   ├── base.py                 # Abstract agent interface
-│   │   ├── bloomberg_agent.py      # ADK agent — Bloomberg ESG perspective
-│   │   ├── lesg_agent.py           # ADK agent — LESG ESG perspective
-│   │   ├── financial_agent.py      # ADK agent — pure financial return
-│   │   └── portfolio_orchestrator.py  # Coordinates all three agents together
+│   ├── agents/                        # Google ADK agents
+│   │   ├── base.py
+│   │   ├── bloomberg_agent.py         # Bloomberg ESG perspective
+│   │   ├── lesg_agent.py              # LESG ESG perspective
+│   │   ├── financial_agent.py         # Pure financial return
+│   │   └── portfolio_orchestrator.py  # Coordinates all three
 │   │
-│   ├── rl/                         # Core reinforcement learning engine (PyTorch)
-│   │   ├── masac.py                # MASAC algorithm (3 agents, 6 critics)
-│   │   ├── networks.py             # ActorNetwork, CriticNetwork (PyTorch)
-│   │   ├── environment.py          # MarketEnvironment (all models + topologies)
-│   │   ├── replay_buffer.py        # 1M-capacity uniform replay buffer
-│   │   └── trainer.py              # Training loop + Redis streaming
+│   ├── rl/                            # PyTorch MASAC engine
+│   │   ├── masac.py                   # 3 actors, 6 critics, shared replay buffer
+│   │   ├── networks.py                # ActorNetwork, CriticNetwork
+│   │   ├── environment.py             # MarketEnvironment (all models + topologies)
+│   │   ├── replay_buffer.py           # 1M-capacity uniform buffer
+│   │   └── trainer.py                 # Training loop + Redis PubSub streaming
 │   │
-│   ├── data/                       # Data pipeline — fetch, preprocess, feature engineering
-│   │   ├── pipeline.py             # End-to-end data orchestration
+│   ├── data/
+│   │   ├── pipeline.py                # Fetch → preprocess → assemble state tensors
 │   │   ├── sources/
-│   │   │   ├── xlsx.py             # XLSX parser — Stage 1 ingestion (return_pct, MACD from Close)
-│   │   │   ├── database.py         # DB-backed sources — Stage 4 reads (pre-computed features)
-│   │   │   ├── market.py           # OHLCV fetcher (yfinance / Bloomberg) — legacy path
-│   │   │   └── esg.py              # ESG score fetcher (Bloomberg / LESG / stub) — legacy path
+│   │   │   ├── xlsx.py                # Stage 1 — XLSX parser, return_pct + macd_hist computation
+│   │   │   ├── database.py            # Stage 4 — DB-backed sources, pre-computed feature reads
+│   │   │   ├── market.py              # Legacy — yfinance OHLCV fetcher
+│   │   │   └── esg.py                 # Legacy — Bloomberg / LESG / stub ESG fetcher
 │   │   └── preprocessing/
-│   │       ├── normalizer.py       # Cross-sectional + time-series normalization
-│   │       └── indicators.py       # RSI(14), MACD histogram(12/26/9)
+│   │       ├── normalizer.py          # Cross-sectional (ESG) + time-series (OHLCV) normalisation
+│   │       └── indicators.py          # RSI, MACD histogram computation
 │   │
-│   ├── models/                     # Data contracts — no logic allowed here
-│   │   ├── domain.py               # SQLAlchemy ORM models (DB tables)
-│   │   └── schemas.py              # Pydantic request/response schemas
+│   ├── models/
+│   │   ├── domain.py                  # SQLAlchemy ORM — assets, market_data, esg_scores,
+│   │   │                              #   training_jobs, training_normalizer_params, ...
+│   │   └── schemas.py                 # Pydantic request/response schemas with examples
 │   │
-│   ├── core/                       # Infrastructure — DB connection pool
-│   │   └── database.py             # Async engine, session factory, create_tables
+│   ├── core/
+│   │   └── database.py                # Async engine, session factory, create_tables
 │   │
-│   └── workers/                    # Background async jobs
-│       └── tasks.py                # Celery training tasks
+│   └── workers/
+│       └── tasks.py                   # Celery training task — DB path + legacy yfinance path
 │
-├── alembic/                        # Database migration scripts
-│   ├── env.py                      # Alembic async env (reads POSTGRES_DSN from settings)
-│   └── versions/                   # Auto-generated migration files
+├── alembic/
+│   ├── env.py                         # Async Alembic env (reads POSTGRES_DSN from settings)
+│   └── versions/                      # Auto-generated migration scripts
+│
 ├── tests/
 │   ├── test_normalizer.py
 │   ├── test_masac.py
 │   └── test_environment.py
-├── alembic.ini                     # Alembic configuration
-├── ARCHITECTURE.md                 # Full system design with diagrams
-├── docker-compose.yml
-├── Dockerfile
+│
+├── alembic.ini
+├── docker-compose.yml                 # Production
+├── docker-compose.dev.yml             # Dev overrides (live reload, debugpy, no limits)
+├── Dockerfile                         # Production image
+├── Dockerfile.development             # Dev image (BuildKit cache, watchfiles, debugpy)
 ├── requirements.txt
+├── pyproject.toml
 └── .env.example
 ```
 
-### Layer Responsibilities
+### Layer boundaries
 
-Each layer has a strict boundary — it owns its concerns and delegates everything else to the layer below it.
-
-| Layer               | Folder        | Owns                                         | Does NOT own                 |
-| ------------------- | ------------- | -------------------------------------------- | ---------------------------- |
-| **HTTP**            | `api/routes/` | URL paths, HTTP status codes, serialization  | Business logic               |
-| **Business Logic**  | `services/`   | Orchestration, business rules                | HTTP details, raw DB queries |
-| **Agent Decisions** | `agents/`     | Per-agent ESG/financial decision-making      | Training loop, HTTP concerns |
-| **RL Engine**       | `rl/`         | MASAC algorithm, neural nets, RL environment | Agent coordination           |
-| **Data Pipeline**   | `data/`       | Fetching + preprocessing raw market/ESG data | Portfolio decisions          |
-| **Data Contracts**  | `models/`     | DB table shapes + API schema validation      | Logic of any kind            |
-| **Infrastructure**  | `core/`       | DB connection pool, session management       | Application logic            |
-| **Background Jobs** | `workers/`    | Long-running async Celery tasks              | Synchronous request handling |
-
-### Data Flow
-
-```
-HTTP Request
-    └── api/routes/            ← validates input, calls service
-            └── services/      ← applies business rules, coordinates layers
-                    ├── agents/         ← each agent makes its ESG/financial decision
-                    │       └── rl/     ← MASAC algorithm + neural nets run here
-                    ├── data/           ← fetches + preprocesses market & ESG data
-                    └── models/domain   ← reads/writes DB via core/database
-```
+| Layer | Folder | Owns | Never touches |
+|---|---|---|---|
+| HTTP | `api/routes/` | URL paths, status codes, serialisation | Business logic |
+| Business logic | `services/` | Orchestration, business rules | HTTP, raw SQL |
+| Agents | `agents/` | Per-agent ESG/financial decisions | Training loop, HTTP |
+| RL engine | `rl/` | MASAC algorithm, neural nets, environment | Agent coordination |
+| Data pipeline | `data/` | Fetching, preprocessing, feature assembly | Portfolio decisions |
+| Data contracts | `models/` | DB shapes, API schema validation | Logic of any kind |
+| Infrastructure | `core/` | Connection pool, session management | Application logic |
+| Background jobs | `workers/` | Long-running async Celery tasks | Synchronous handling |
 
 ---
 
-## Environment Variables
-
-| Variable                | Default                                                           | Description                                  |
-| ----------------------- | ----------------------------------------------------------------- | -------------------------------------------- |
-| `POSTGRES_DSN`          | `postgresql+asyncpg://madrl:madrl@localhost:5432/madrl_portfolio` | Async PostgreSQL connection string           |
-| `REDIS_URL`             | `redis://localhost:6379/0`                                        | Redis for caching and PubSub                 |
-| `CELERY_BROKER_URL`     | `redis://localhost:6379/1`                                        | Celery message broker                        |
-| `CELERY_RESULT_BACKEND` | `redis://localhost:6379/2`                                        | Celery result storage                        |
-| `GOOGLE_API_KEY`        | _(required)_                                                      | Google AI API key for ADK agents             |
-| `ADK_MODEL`             | `gemini-2.0-flash`                                                | ADK LLM model for agents                     |
-| `BLOOMBERG_API_KEY`     | _(optional)_                                                      | Bloomberg ESG API — uses stub data if empty  |
-| `LESG_API_KEY`          | _(optional)_                                                      | LESG API — uses stub data if empty           |
-| `MODEL_STORE_PATH`      | `./model_store`                                                   | Directory for trained actor/critic weights   |
-| `DEBUG`                 | `false`                                                           | Enables SQLAlchemy query logging             |
-| `MASAC_MAX_STEPS`       | `500000`                                                          | Maximum training steps per topology          |
-| `MASAC_HIDDEN_SIZE`     | `256`                                                             | Hidden layer width for Actor and Critic MLPs |
-
----
-
-## Key Design Decisions
+## Design Decisions
 
 **Why three topologies run concurrently?**
-The same normalized state vector is fed to all three topologies. The allocation differences emerge entirely from the reward structure — specifically how the shared ambiguity penalty `β · ΔESGₜ` is applied (full / zero / partial). Running them in parallel lets users observe the direct impact of game-theoretic framing on portfolio construction.
+The same normalised state vector feeds all three topologies. Allocation differences emerge purely from how the ambiguity penalty `β·ΔESGₜ` is applied — full, zero, or partial. Running them in parallel makes the game-theoretic effect directly observable without confounding variables.
+
+**Why cross-sectional normalisation for ESG but time-series for OHLCV?**
+Bloomberg (0–100) and LESG (0–10) are on incompatible scales. Cross-sectional min-max per trading day harmonises them with zero temporal look-ahead — only same-day peer values are used. OHLCV/RSI/MACD are normalised per-asset over the training window and frozen before the validation window, preventing data leakage.
 
 **Why no tanh on actor output?**
-Portfolio weights are produced by Softmax over the joint score vector `z_joint`. Softmax accepts unbounded real inputs directly, and tanh squashing would distort the score magnitudes without providing any benefit for the sum-to-one constraint.
+Portfolio weights are produced by Softmax over `z_joint`. Softmax accepts unbounded real inputs and enforces the sum-to-one constraint natively. tanh squashing would distort score magnitudes with no benefit.
 
-**Why cross-sectional normalization for ESG but time-series for OHLCV?**
-ESG scores from different agencies (Bloomberg 0–100, LESG 0–10) must be harmonized to a comparable scale _before_ computing `ΔESGᵢₜ` and `μESGᵢₜ`. Cross-sectional normalization (same-day peer ranking) achieves this with zero temporal look-ahead. OHLCV/RSI/MACD are normalized per-asset over the training window and frozen before the test window to prevent data leakage.
+**Why staged DB persistence?**
+Stage 2 (ESG normalisation) depends on Stage 1 being complete across all N assets — you cannot normalise cross-sectionally until every asset's score for that date is in the DB. Stage 3 (normaliser fit) depends on Stage 2. Staged persistence makes each dependency explicit and recoverable.
 
 ---
 
-## Stopping and Cleanup
+## Testing
 
 ```bash
-# Stop all containers (preserve data volumes)
+# Activate venv
+.venv\Scripts\Activate.ps1        # Windows
+source .venv/bin/activate         # macOS / Linux
+
+# Run all tests
+pytest tests/ -v
+
+# With coverage
+pytest tests/ -v --cov=app --cov-report=term-missing
+
+# Individual suites
+pytest tests/test_normalizer.py -v    # No-leakage normalisation checks
+pytest tests/test_masac.py -v         # Actor/Critic networks, replay buffer, update step
+pytest tests/test_environment.py -v   # Reward functions, topology β differences
+```
+
+---
+
+## Operations
+
+```bash
+# View logs
+docker compose logs -f api
+docker compose logs -f worker
+
+# Restart a single service (e.g. after a config change)
+docker compose restart api
+
+# Stop — preserve volumes (data intact)
 docker compose down
 
-# Stop and remove all data volumes (full reset)
+# Full reset — destroy all data
 docker compose down -v
 
-# Stop a running training job
-curl -X POST http://localhost:8000/api/v1/training/{job_id}/stop
+# Rebuild after code or requirements change (production)
+docker compose up --build -d
+
+# Switch from dev back to production
+docker compose -f docker-compose.yml up --build -d
 ```

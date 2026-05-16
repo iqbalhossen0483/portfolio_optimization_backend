@@ -1,10 +1,7 @@
 """
 XLSXDataSource — parses one or more .xlsx files in Stock_ESG_Dataset format.
 
-Raw values taken directly from file (no recomputation):
-  - OHLCV, RSI, Bloomberg ESG (0-100), LESG ESG (0-10)
-
-Computed from Close (only these two):
+Computed from Close:
   - return_pct  : per-ISIN pct_change of Close
   - macd_hist   : MACD histogram per-ISIN using cfg.macd_fast/slow/signal
 
@@ -29,7 +26,6 @@ log = structlog.get_logger(__name__)
 cfg = get_settings()
 
 # Maps XLSX column headers → internal names.
-# RSI is included here so it is read directly from the file.
 COLUMN_MAP: dict[str, str] = {
     "Date": "date",
     "ISIN": "isin",

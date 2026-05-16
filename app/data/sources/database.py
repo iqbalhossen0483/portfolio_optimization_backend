@@ -59,9 +59,9 @@ class DatabaseMarketDataSource:
                           AND m.date BETWEEN :start AND :end
                         ORDER BY a.isin, m.date
                     """),
-                    {"isins": isins, "start": str(start), "end": str(end)},
+                    {"isins": isins, "start": start, "end": end},
                 )
-                df = pd.DataFrame(rows.fetchall(), columns=rows.keys())
+                df = pd.DataFrame(rows.fetchall(), columns=list(rows.keys()))
         finally:
             await engine.dispose()
 
@@ -73,7 +73,7 @@ class DatabaseMarketDataSource:
 
         result: dict[str, pd.DataFrame] = {}
         for isin, group in df.groupby("isin", sort=False):
-            result[isin] = group.drop(columns=["isin"]).reset_index(drop=True)
+            result[str(isin)] = group.drop(columns=["isin"]).reset_index(drop=True)
 
         log.info(
             "db_market_fetched",
@@ -134,9 +134,9 @@ class DatabaseESGDataSource:
                           AND e.date BETWEEN :start AND :end
                         ORDER BY a.isin, e.date
                     """),
-                    {"isins": isins, "start": str(start), "end": str(end)},
+                    {"isins": isins, "start": start, "end": end},
                 )
-                df = pd.DataFrame(rows.fetchall(), columns=rows.keys())
+                df = pd.DataFrame(rows.fetchall(), columns=list(rows.keys()))
         finally:
             await engine.dispose()
 
@@ -148,7 +148,7 @@ class DatabaseESGDataSource:
 
         result: dict[str, pd.DataFrame] = {}
         for isin, group in df.groupby("isin", sort=False):
-            result[isin] = group.drop(columns=["isin"]).reset_index(drop=True)
+            result[str(isin)] = group.drop(columns=["isin"]).reset_index(drop=True)
 
         log.info(
             "db_esg_fetched",

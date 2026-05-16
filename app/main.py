@@ -26,8 +26,8 @@ TAGS_METADATA = [
             "**MASAC training jobs.**\n\n"
             "Upload one or more `.xlsx` files containing historical OHLCV + ESG data. "
             "The system runs a 4-stage pipeline:\n\n"
-            "1. **Stage 1** — Parse XLSX → compute `return_pct` + `macd_hist` from Close; "
-            "RSI taken directly from file → bulk-upsert to `assets`, `market_data`, `esg_scores`\n"
+            "1. **Stage 1** — Parse XLSX → compute `return_pct` + `macd_hist` from Close "
+            "→ bulk-upsert to `assets`, `market_data`, `esg_scores`\n"
             "2. **Stage 2** — Cross-sectional ESG normalisation per date across all N ISINs "
             "→ store `esg_b_norm`, `esg_l_norm`, `delta_esg`, `mu_esg` in `esg_scores`\n"
             "3. **Stage 3** — Fit time-series min/max normaliser on training window "
@@ -114,7 +114,7 @@ POST /training/start  (multipart: .xlsx files + form fields)
 | Sector | string | — |
 | Open / High / Low / Close | float | Raw OHLCV — stored as-is |
 | Volume | string / float | Accepts `10.5M`, `2.3K`, `1B`, `1T` or plain number |
-| RSI | float | Pre-computed — taken directly from file, **not** recomputed |
+| RSI | float | RSI value |
 | Bloom. ESG (0-100) | float | Bloomberg ESG score |
 | LESG ESG (0-10) | float | LESG ESG score |
 """
