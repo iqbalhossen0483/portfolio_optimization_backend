@@ -35,6 +35,7 @@ celery_app.conf.update(
     result_serializer="json",
     accept_content=["json"],
     timezone="UTC",
+    worker_pool="solo",       # Windows: prefork uses fork() which is unsupported
 )
 
 
@@ -104,6 +105,7 @@ async def _async_run_training(job_id: int, config: dict) -> dict:
                     hyperparams=hp,
                     model_store_path=cfg.model_store_path,
                     redis_client=redis_client,
+                    db=db,
                 )
                 result = await trainer.run()
                 results.append(result)

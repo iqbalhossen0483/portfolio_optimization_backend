@@ -17,6 +17,7 @@ import json
 import os
 import time
 from collections import deque
+from typing import TYPE_CHECKING
 
 import numpy as np
 import structlog
@@ -25,6 +26,9 @@ from app.rl.environment import MarketEnvironment
 from app.rl.masac import MASAC
 from app.data.pipeline import ProcessedDataset
 from app.config import get_settings
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 log = structlog.get_logger(__name__)
 cfg = get_settings()
@@ -45,6 +49,7 @@ class TrainingOrchestrator:
         hyperparams: dict,
         model_store_path: str,
         redis_client=None,
+        db: "AsyncSession | None" = None,
     ) -> None:
         self.job_id  = job_id
         self.dataset = dataset
@@ -53,6 +58,7 @@ class TrainingOrchestrator:
         self.hyperparams = hyperparams
         self.model_store_path = model_store_path
         self._redis = redis_client
+        self._db = db
         self._stop_requested = False
 
         self.env = MarketEnvironment(
@@ -160,6 +166,8 @@ class TrainingOrchestrator:
                                 self.model_store_path, str(self.job_id), self.topology
                             )
                             self.masac.save(ckpt_path)
+                            mean_entropy = float(np.mean(entropy_window)) if entropy_window else 0.0
+                            await self._save_checkpoint(global_step, ckpt_path, sharpe, mu_esg, mean_entropy)
                             log.info("Checkpoint saved", step=global_step,
                                      sharpe=sharpe, mu_esg=mu_esg)
 
@@ -180,6 +188,29 @@ class TrainingOrchestrator:
 
     def stop(self) -> None:
         self._stop_requested = True
+
+    # ── Checkpoint persistence ────────────────────────────────────────────────
+
+    async def _save_checkpoint(
+        self,
+        step: int,
+        path: str,
+        sharpe: float,
+        mu_esg: float,
+        entropy: float,
+    ) -> None:
+        if not self._db:
+            return
+        from app.models.domain import ModelCheckpoint
+        self._db.add(ModelCheckpoint(
+            job_id=self.job_id,
+            step=step,
+            path=path,
+            sharpe=sharpe,
+            mu_esg=mu_esg,
+            entropy=entropy,
+        ))
+        await self._db.commit()
 
     # ── Validation evaluation ─────────────────────────────────────────────────
 

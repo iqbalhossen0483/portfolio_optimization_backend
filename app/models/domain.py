@@ -17,7 +17,7 @@ class Asset(Base):
     isin: Mapped[str] = mapped_column(String(12), unique=True, nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(256), nullable=False)
     sector: Mapped[str] = mapped_column(String(128), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     market_data: Mapped[list[MarketData]] = relationship(back_populates="asset")
     esg_scores: Mapped[list[ESGScore]] = relationship(back_populates="asset")
@@ -71,9 +71,9 @@ class TrainingJob(Base):
     best_sharpe: Mapped[float | None] = mapped_column(Float, nullable=True)
     best_mu_esg: Mapped[float | None] = mapped_column(Float, nullable=True)
     error_message: Mapped[str | None] = mapped_column(String(1024), nullable=True)
-    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     checkpoints: Mapped[list[ModelCheckpoint]] = relationship(back_populates="job")
 
@@ -88,7 +88,7 @@ class ModelCheckpoint(Base):
     sharpe: Mapped[float | None] = mapped_column(Float, nullable=True)
     mu_esg: Mapped[float | None] = mapped_column(Float, nullable=True)
     entropy: Mapped[float | None] = mapped_column(Float, nullable=True)
-    saved_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    saved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     job: Mapped[TrainingJob] = relationship(back_populates="checkpoints")
 
