@@ -83,6 +83,7 @@ class ModelCheckpoint(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     job_id: Mapped[int] = mapped_column(ForeignKey("training_jobs.id"), index=True)
+    topology: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     step: Mapped[int] = mapped_column(Integer, nullable=False)
     path: Mapped[str] = mapped_column(String(512), nullable=False)
     sharpe: Mapped[float | None] = mapped_column(Float, nullable=True)

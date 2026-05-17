@@ -167,7 +167,7 @@ class TrainingOrchestrator:
                             )
                             self.masac.save(ckpt_path)
                             mean_entropy = float(np.mean(entropy_window)) if entropy_window else 0.0
-                            await self._save_checkpoint(global_step, ckpt_path, sharpe, mu_esg, mean_entropy)
+                            await self._save_checkpoint(global_step, ckpt_path, sharpe, mu_esg, mean_entropy, self.topology)
                             log.info("Checkpoint saved", step=global_step,
                                      sharpe=sharpe, mu_esg=mu_esg)
 
@@ -198,12 +198,14 @@ class TrainingOrchestrator:
         sharpe: float,
         mu_esg: float,
         entropy: float,
+        topology: str,
     ) -> None:
         if not self._db:
             return
         from app.models.domain import ModelCheckpoint
         self._db.add(ModelCheckpoint(
             job_id=self.job_id,
+            topology=topology,
             step=step,
             path=path,
             sharpe=sharpe,

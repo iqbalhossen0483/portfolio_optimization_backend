@@ -12,7 +12,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.config import get_settings
 from app.core.database import create_tables
-from app.api.routes import training, data, websocket
+from app.api.routes import training, data, websocket, chat
 
 log = structlog.get_logger(__name__)
 cfg = get_settings()
@@ -48,6 +48,15 @@ TAGS_METADATA = [
         "description": (
             "**Real-time WebSocket streams.**\n\n"
             "- `WS /ws/training/{job_id}` — live MASAC step metrics via Redis PubSub"
+        ),
+    },
+    {
+        "name": "chat",
+        "description": (
+            "**Natural language portfolio advisor.**\n\n"
+            "Send plain-English queries to the Google ADK agent. "
+            "It parses your intent, runs MASAC inference across all three topologies, "
+            "and returns three side-by-side portfolio panels with per-asset weights and allocations."
         ),
     },
     {
@@ -144,6 +153,7 @@ def create_app() -> FastAPI:
     api_prefix = "/api/v1"
     app.include_router(training.router,  prefix=api_prefix)
     app.include_router(data.router,      prefix=api_prefix)
+    app.include_router(chat.router,      prefix=api_prefix)
     app.include_router(websocket.router)
 
     @app.get(

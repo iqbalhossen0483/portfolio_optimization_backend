@@ -45,3 +45,8 @@ async def get_training_service(
 ):
     from app.services.training_service import TrainingService
     return TrainingService(db=db, redis_client=redis_client)
+
+
+def get_chat_service():
+    from app.services.chat_service import ChatService
+    return ChatService(dsn=cfg.postgres_dsn)

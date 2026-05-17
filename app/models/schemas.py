@@ -153,29 +153,60 @@ class AssetsResponse(BaseModel):
     total: int = Field(description="Total number of assets returned")
 
 
-class DataIngestionRequest(BaseModel):
+# ── Chat ─────────────────────────────────────────────────────────────────────
+
+class ChatRequest(BaseModel):
     model_config = ConfigDict(json_schema_extra={
         "example": {
-            "assets": ["GB0002875804", "US0378331005"],
-            "start_date": "2020-01-01",
-            "end_date": "2024-12-31",
-            "sources": ["market", "bloomberg", "lesg"],
+            "message": "I have $10,000,000 to allocate. Use Portfolio C.",
+            "session_id": None,
         }
     })
 
-    assets: list[str] = Field(description="List of ISINs to ingest")
-    start_date: date
-    end_date: date
-    sources: list[str] = Field(
-        default_factory=lambda: ["market", "bloomberg", "lesg"],
-        description="Data sources to fetch: market (OHLCV), bloomberg (ESG 0-100), lesg (ESG 0-10)",
+    message: str = Field(description="Natural language query or follow-up message")
+    session_id: str | None = Field(
+        default=None,
+        description="Session ID from a previous response. Omit on the first message — the server generates one.",
     )
 
 
-class DataIngestionResponse(BaseModel):
-    job_id: str  # legacy data ingestion — keeps str for backward compat
-    assets_queued: int
-    status: str
+class PortfolioAssetPanel(BaseModel):
+    """Per-asset allocation row returned in each topology panel."""
+    isin: str
+    company: str | None = None
+    sector: str | None = None
+    return_ann: float | None = Field(default=None, description="Annualised return = mean(daily return) × 252")
+    risk: float | None = Field(default=None, description="Annualised std = std(daily return) × √252")
+    sharpe: float | None = Field(default=None, description="Sharpe ratio (risk-free rate = 0)")
+    mu_esg: float | None = Field(default=None, description="Per-stock ESG consensus (esg_b_norm + esg_l_norm) / 2")
+    delta_esg: float | None = Field(default=None, description="Per-stock ESG disagreement |esg_b_norm − esg_l_norm|")
+    weight: float = Field(description="Portfolio weight ∈ [0, 1]; all N weights sum to 1.0")
+    allocation: float = Field(description="weight × investment_amount in USD")
+
+
+class ChatResponse(BaseModel):
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "session_id": "3f7a2b1c-9e4d-4a2f-b83c-1d2e5f6a7b8c",
+            "response": "Here are your Portfolio C recommendations across all three topologies...",
+            "job_id": 16,
+            "portfolio_model": "C",
+            "panels": {
+                "cooperative": [],
+                "competitive": [],
+                "mixed": [],
+            },
+        }
+    })
+
+    session_id: str = Field(description="Include in follow-up requests to continue the conversation")
+    response: str = Field(description="LLM natural language reply")
+    job_id: int | None = Field(default=None, description="Training job used for inference")
+    portfolio_model: str | None = Field(default=None, description="Portfolio model used (A, B, or C)")
+    panels: dict[str, list[PortfolioAssetPanel]] | None = Field(
+        default=None,
+        description="Three topology panels (cooperative, competitive, mixed). null for conversational queries.",
+    )
 
 
 # ── WebSocket message schemas (documented for reference) ─────────────────────

@@ -5,6 +5,7 @@ websockets==15.0.1
 
 # ADK (Google Agent Development Kit)
 google-adk==1.33.0
+httpx==0.28.1 
 
 # RL / ML
 torch==2.11.0

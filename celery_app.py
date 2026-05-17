@@ -19,3 +19,4 @@ if _project_root not in sys.path:
 from app.workers.tasks import celery_app  # noqa: E402
 
 __all__ = ["celery_app"]
+ 
