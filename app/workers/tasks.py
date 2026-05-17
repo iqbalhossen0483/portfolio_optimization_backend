@@ -61,6 +61,8 @@ async def _async_run_training(job_id: int, config: dict) -> dict:
     hp = config["hyperparams"]
     train_start = date.fromisoformat(config["train_start"])
     train_end   = date.fromisoformat(config["train_end"])
+    val_start   = date.fromisoformat(config["val_start"])
+    val_end     = date.fromisoformat(config["val_end"])
     isins       = config["assets"]
 
     # ── Data sources (DB-backed, pre-computed features) ──────────────────────
@@ -78,6 +80,11 @@ async def _async_run_training(job_id: int, config: dict) -> dict:
         isins, train_start, train_end,
         fit=False, normalizer=frozen_normalizer,
     )
+    val_ds = await pipeline.prepare(
+        isins, val_start, val_end,
+        fit=False, normalizer=frozen_normalizer,
+    )
+    log.info("stage4_datasets_ready", train_rows=train_ds.n_timesteps, val_rows=val_ds.n_timesteps)
 
     # ── Training loop ─────────────────────────────────────────────────────────
     results = []
@@ -104,6 +111,7 @@ async def _async_run_training(job_id: int, config: dict) -> dict:
                     topology=topology,
                     hyperparams=hp,
                     model_store_path=cfg.model_store_path,
+                    val_dataset=val_ds,
                     redis_client=redis_client,
                     db=db,
                 )

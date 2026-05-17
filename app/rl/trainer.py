@@ -48,11 +48,13 @@ class TrainingOrchestrator:
         topology: str,
         hyperparams: dict,
         model_store_path: str,
+        val_dataset: ProcessedDataset | None = None,
         redis_client=None,
         db: "AsyncSession | None" = None,
     ) -> None:
         self.job_id  = job_id
         self.dataset = dataset
+        self.val_dataset = val_dataset
         self.topology = topology
         self.portfolio_model = portfolio_model
         self.hyperparams = hyperparams
@@ -218,23 +220,27 @@ class TrainingOrchestrator:
 
     def _eval_validation(self) -> tuple[float, float]:
         """
-        Quick 63-day rolling validation using deterministic actions.
-        Returns (Sharpe, mean μESG) — display metrics only.
+        63-day out-of-sample validation using deterministic actions.
+        Uses val_dataset (held-out window) when available; falls back to
+        training dataset tail only if val_dataset was not provided.
+        Returns (Sharpe, mean μESG) — used for checkpoint selection only.
         """
-        obs = self.env.dataset.state_vectors[0].copy()
+        eval_ds = self.val_dataset if self.val_dataset is not None else self.env.dataset
+        obs = eval_ds.state_vectors[0].copy()
         returns_list, mu_esg_list = [], []
 
-        for t in range(min(cfg.validation_window_days, self.env.dataset.n_timesteps - 1)):
+        for t in range(min(cfg.validation_window_days, eval_ds.n_timesteps - 1)):
             actions = self.masac.select_actions(obs, deterministic=True)
-            result = self.env.step(
-                actions["bloomberg"], actions["lesg"], actions["financial"]
-            )
-            r_t = result.info["r_t"]
+            z_joint = (
+                actions["bloomberg"] + actions["lesg"] + actions["financial"]
+            ) / 3.0
+            weights = np.exp(z_joint - z_joint.max())
+            weights /= weights.sum()
+            r_t = float(np.dot(weights, eval_ds.returns[t]))
             returns_list.append(r_t)
-            mu_esg_list.append(float(np.mean(result.info["weights"])))  # simplified
-            obs = result.obs
-            if result.done:
-                break
+            mu_esg_list.append(float(np.mean(eval_ds.mu_esg[t])))
+            next_t = t + 1
+            obs = eval_ds.state_vectors[next_t].copy() if next_t < eval_ds.n_timesteps else obs
 
         r_arr = np.array(returns_list)
         annualized_return = r_arr.mean() * 252
