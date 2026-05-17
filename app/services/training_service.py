@@ -1,8 +1,7 @@
 """
 TrainingService — orchestrates background training jobs via Celery.
 
-start_training()           — legacy JSON-body path (backward compat)
-start_training_from_xlsx() — new XLSX multipart path:
+start_training_from_xlsx() — XLSX multipart path:
     Stage 1: parse XLSX → upsert assets / market_data / esg_scores
     Stage 2: cross-sectional ESG normalization → update esg_scores
     Stage 3: fit time-series normalizer → insert training_normalizer_params
@@ -18,7 +17,6 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.domain import TrainingJob
-from app.models.schemas import TrainingRequest
 from app.config import get_settings
 
 log = structlog.get_logger(__name__)
@@ -30,46 +28,6 @@ class TrainingService:
     def __init__(self, db: AsyncSession, redis_client=None) -> None:
         self._db = db
         self._redis = redis_client
-
-    # ── Legacy JSON-body path (backward compat) ───────────────────────────────
-
-    async def start_training(self, request: TrainingRequest) -> int:
-        """Create a DB record and enqueue Celery tasks. Returns job_id."""
-        topologies = (
-            ["cooperative", "competitive", "mixed"]
-            if request.topology.value == "all"
-            else [request.topology.value]
-        )
-
-        config = {
-            "portfolio_model": request.portfolio_model.value,
-            "topologies": topologies,
-            "assets": request.assets,
-            "train_start": str(request.train_start),
-            "train_end": str(request.train_end),
-            "val_start": str(request.val_start),
-            "val_end": str(request.val_end),
-            "hyperparams": request.hyperparams.model_dump(),
-        }
-
-        job = TrainingJob(
-            status="queued",
-            portfolio_model=request.portfolio_model.value,
-            topology=request.topology.value,
-            config_json=config,
-            started_at=None,
-        )
-        self._db.add(job)
-        await self._db.flush()   # populates job.id from DB autoincrement
-        job_id: int = job.id
-        await self._db.commit()
-
-        from app.workers.tasks import run_training_job
-        import asyncio
-        await asyncio.to_thread(run_training_job.delay, job_id, config)  # type: ignore[attr-defined]
-
-        log.info("training_job_queued", job_id=job_id, topologies=topologies)
-        return job_id
 
     # ── XLSX multipart path (4-stage pipeline) ────────────────────────────────
 

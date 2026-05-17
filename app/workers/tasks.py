@@ -2,12 +2,8 @@
 Celery tasks for background training.
 Each task manages one (job_id, topology) training run.
 
-When config["data_source"] == "database":
-    - DatabaseMarketDataSource + DatabaseESGDataSource (all pre-computed, no API calls)
-    - DataNormalizer loaded from training_normalizer_params table (frozen, no refit)
-Otherwise (legacy path):
-    - MarketDataSource (yfinance) + ESGDataSource (stub / Bloomberg API)
-    - DataNormalizer fitted fresh on the training window
+Data source: DatabaseMarketDataSource + DatabaseESGDataSource (all pre-computed, no API calls).
+Normalizer: loaded from training_normalizer_params table (frozen, no refit).
 """
 from __future__ import annotations
 import asyncio
@@ -66,44 +62,21 @@ async def _async_run_training(job_id: int, config: dict) -> dict:
     train_end   = date.fromisoformat(config["train_end"])
     isins       = config["assets"]
 
-    # ── Data source selection ─────────────────────────────────────────────────
-    market_src: object
-    esg_src: object
-    if config.get("data_source") == "database":
-        from app.data.sources.database import (
-            DatabaseMarketDataSource,
-            DatabaseESGDataSource,
-        )
-        from app.data.preprocessing.normalizer import DataNormalizer
+    # ── Data sources (DB-backed, pre-computed features) ──────────────────────
+    from app.data.sources.database import DatabaseMarketDataSource, DatabaseESGDataSource
+    from app.data.preprocessing.normalizer import DataNormalizer
 
-        market_src = DatabaseMarketDataSource(cfg.postgres_dsn)
-        esg_src    = DatabaseESGDataSource(cfg.postgres_dsn)
-        pipeline   = DataPipeline(market_src, esg_src)
+    market_src = DatabaseMarketDataSource(cfg.postgres_dsn)
+    esg_src    = DatabaseESGDataSource(cfg.postgres_dsn)
+    pipeline   = DataPipeline(market_src, esg_src)
 
-        # Load frozen normalizer params from DB (fitted in Stage 3, no refit)
-        frozen_normalizer = await DataNormalizer.load_from_db(job_id, cfg.postgres_dsn)
+    frozen_normalizer = await DataNormalizer.load_from_db(job_id, cfg.postgres_dsn)
+    log.info("stage4_db_sources", job_id=job_id, n_assets=len(isins))
 
-        log.info("stage4_db_sources", job_id=job_id, n_assets=len(isins))
-
-        train_ds = await pipeline.prepare(
-            isins, train_start, train_end,
-            fit=False, normalizer=frozen_normalizer,
-        )
-    else:
-        # Legacy path: yfinance + ESG stub (backward compat — non-XLSX jobs)
-        from app.data.sources.market import MarketDataSource
-        from app.data.sources.esg import ESGDataSource
-
-        market_src = MarketDataSource(redis_client, ttl=cfg.redis_ttl_market)
-        esg_src    = ESGDataSource(
-            bloomberg_api_key=cfg.bloomberg_api_key,
-            lesg_api_key=cfg.lesg_api_key,
-            redis_client=redis_client,
-            use_stub=(not cfg.bloomberg_api_key),
-        )
-        pipeline = DataPipeline(market_src, esg_src)
-
-        train_ds = await pipeline.prepare(isins, train_start, train_end, fit=True)
+    train_ds = await pipeline.prepare(
+        isins, train_start, train_end,
+        fit=False, normalizer=frozen_normalizer,
+    )
 
     # ── Training loop ─────────────────────────────────────────────────────────
     results = []

@@ -1,16 +1,12 @@
 from __future__ import annotations
-import uuid
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.api.deps import get_db
 from app.models.domain import Asset
-from app.models.schemas import (
-    AssetsResponse, AssetInfo,
-    DataIngestionRequest, DataIngestionResponse,
-)
+from app.models.schemas import AssetsResponse, AssetInfo
 
 router = APIRouter(prefix="/data", tags=["data"])
 
@@ -45,42 +41,6 @@ async def list_assets(
     return AssetsResponse(
         assets=[AssetInfo(isin=a.isin, name=a.name, sector=a.sector) for a in assets],
         total=len(assets),
-    )
-
-
-@router.post(
-    "/ingest",
-    summary="Trigger legacy data ingestion (yfinance / ESG stub)",
-    description=(
-        "Queues a Celery task to fetch OHLCV and ESG data from external APIs "
-        "(yfinance for market data; Bloomberg or synthetic stub for ESG) "
-        "and store the results in the database.\n\n"
-        "> **Note:** This is the **legacy ingestion path**. "
-        "The primary ingestion path is `POST /training/start` which accepts `.xlsx` files "
-        "and runs the full 4-stage pipeline with real data. "
-        "Use this endpoint only if you want to pre-populate the DB from yfinance / Bloomberg API."
-    ),
-    response_model=DataIngestionResponse,
-    response_description="Job queued — use job_id to track progress",
-    status_code=status.HTTP_202_ACCEPTED,
-    responses={
-        422: {"description": "Validation error — invalid date range or empty asset list"},
-    },
-)
-async def ingest_data(
-    request: DataIngestionRequest,
-    db: AsyncSession = Depends(get_db),
-) -> DataIngestionResponse:
-    from app.workers.tasks import celery_app
-    job_id = str(uuid.uuid4())
-    celery_app.send_task(
-        "ingest_data",
-        args=[job_id, request.model_dump(mode="json")],
-    )
-    return DataIngestionResponse(
-        job_id=job_id,
-        assets_queued=len(request.assets),
-        status="queued",
     )
 
 

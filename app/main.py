@@ -40,8 +40,7 @@ TAGS_METADATA = [
         "name": "data",
         "description": (
             "**Asset and data management.**\n\n"
-            "Query ingested assets and trigger legacy data ingestion (yfinance / Bloomberg stub). "
-            "The primary ingestion path is via `POST /training/start` with XLSX files."
+            "Query ingested assets. Assets are populated via `POST /training/start` with XLSX files."
         ),
     },
     {
