@@ -14,7 +14,7 @@ from datetime import date
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 
-from app.api.deps import get_training_service
+from app.api.deps import get_current_user, get_training_service, require_admin
 from app.models.schemas import (
     HyperParams, TrainingJobResponse, TrainingStatusResponse, TrainingStatus,
     PortfolioModel, Topology,
@@ -67,6 +67,7 @@ _VALID_TOPOLOGIES = {t.value for t in Topology}
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def start_training(
+    _: object = Depends(require_admin),
     files: list[UploadFile] = File(
         ...,
         description=(
@@ -205,6 +206,7 @@ async def start_training(
 )
 async def get_training_status(
     job_id: int,
+    _: object = Depends(get_current_user),
     service: TrainingService = Depends(get_training_service),
 ) -> TrainingStatusResponse:
     data = await service.get_status(job_id)
@@ -230,6 +232,7 @@ async def get_training_status(
 )
 async def stop_training(
     job_id: int,
+    _: object = Depends(require_admin),
     service: TrainingService = Depends(get_training_service),
 ) -> dict:
     ok = await service.stop_training(job_id)

@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     masac_initial_alpha_t: float = 1.0
     masac_hidden_size: int = 256
 
+    # JWT / Auth
+    jwt_secret_key: str = "change-me-in-production-use-a-long-random-string"
+    jwt_algorithm: str = "HS256"
+    jwt_expire_minutes: int = 1440  # 24 hours
+
     # Technical indicator parameters
     rsi_period: int = 14
     macd_fast: int = 12

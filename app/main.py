@@ -12,7 +12,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.config import get_settings
 from app.core.database import create_tables
-from app.api.routes import training, data, websocket, chat
+from app.api.routes import training, data, websocket, chat, auth
 
 log = structlog.get_logger(__name__)
 cfg = get_settings()
@@ -57,6 +57,18 @@ TAGS_METADATA = [
             "Send plain-English queries to the Google ADK agent. "
             "It parses your intent, runs MASAC inference across all three topologies, "
             "and returns three side-by-side portfolio panels with per-asset weights and allocations."
+        ),
+    },
+    {
+        "name": "auth",
+        "description": (
+            "**Authentication & user management.**\n\n"
+            "- `POST /auth/register` — create an account (role: `user` by default)\n"
+            "- `POST /auth/login` — obtain a JWT Bearer token\n"
+            "- `GET /auth/me` — get your own profile\n"
+            "- `PUT /auth/me` — update email, username, or password\n"
+            "- `GET /auth/users` — *(admin)* list all users\n"
+            "- `PUT /auth/users/{id}/role` — *(admin)* promote/demote a user"
         ),
     },
     {
@@ -151,6 +163,7 @@ def create_app() -> FastAPI:
     Instrumentator().instrument(app).expose(app)
 
     api_prefix = "/api/v1"
+    app.include_router(auth.router,      prefix=api_prefix)
     app.include_router(training.router,  prefix=api_prefix)
     app.include_router(data.router,      prefix=api_prefix)
     app.include_router(chat.router,      prefix=api_prefix)

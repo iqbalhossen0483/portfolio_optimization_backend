@@ -1,8 +1,73 @@
 from __future__ import annotations
-from datetime import date
+from datetime import date, datetime
 from enum import Enum
 from typing import Any
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+# ── Auth ─────────────────────────────────────────────────────────────────────
+
+class UserRole(str, Enum):
+    USER = "user"
+    ADMIN = "admin"
+
+
+class RegisterRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={
+        "example": {"email": "alice@example.com", "username": "alice", "password": "secret123"}
+    })
+    email: str = Field(..., description="User email address")
+    username: str = Field(..., min_length=3, max_length=64, description="Unique username")
+    password: str = Field(..., min_length=6, description="Password (min 6 characters)")
+
+    @field_validator("email")
+    @classmethod
+    def email_must_contain_at(cls, v: str) -> str:
+        if "@" not in v:
+            raise ValueError("Invalid email address")
+        return v.lower().strip()
+
+
+class LoginRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={
+        "example": {"email": "alice@example.com", "password": "secret123"}
+    })
+    email: str = Field(..., description="Registered email address")
+    password: str = Field(..., description="Account password")
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    role: UserRole
+
+
+class UserProfile(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    email: str
+    username: str
+    role: UserRole
+    is_active: bool
+    created_at: datetime
+
+
+class UpdateProfileRequest(BaseModel):
+    model_config = ConfigDict(json_schema_extra={
+        "example": {"username": "new_name", "password": "newpassword123"}
+    })
+    email: str | None = Field(default=None, description="New email address")
+    username: str | None = Field(default=None, min_length=3, max_length=64, description="New username")
+    password: str | None = Field(default=None, min_length=6, description="New password")
+
+
+class UpdateRoleRequest(BaseModel):
+    role: UserRole = Field(..., description="New role to assign")
+
+
+class UserListResponse(BaseModel):
+    users: list[UserProfile]
+    total: int
 
 
 # ── Enumerations ──────────────────────────────────────────────────────────────

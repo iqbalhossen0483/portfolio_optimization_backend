@@ -4,7 +4,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.api.deps import get_chat_service
+from app.api.deps import get_chat_service, get_current_user
 from app.models.schemas import ChatRequest, ChatResponse, PortfolioAssetPanel
 from app.services.chat_service import ChatService
 
@@ -35,6 +35,7 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 )
 async def chat(
     request: ChatRequest,
+    _: object = Depends(get_current_user),
     service: ChatService = Depends(get_chat_service),
 ) -> ChatResponse:
     session_id = request.session_id or str(uuid.uuid4())

@@ -1,15 +1,17 @@
 """
 WebSocket endpoints for real-time streaming:
   /ws/training/{job_id}   — streams step metrics from Redis PubSub
-  /ws/portfolio/{session_id} — interactive portfolio recalculation
+
+Auth: pass the JWT as a query param: ?token=<access_token>
 """
 from __future__ import annotations
 import json
 
 import structlog
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, Query
 
-from app.api.deps import get_redis
+from app.api.deps import get_db, get_ws_user, get_redis
+from sqlalchemy.ext.asyncio import AsyncSession
 
 log = structlog.get_logger(__name__)
 router = APIRouter(prefix="/ws", tags=["websocket"])
@@ -19,17 +21,25 @@ router = APIRouter(prefix="/ws", tags=["websocket"])
 async def training_stream(
     websocket: WebSocket,
     job_id: int,
+    token: str = Query(..., description="JWT access token"),
+    db: AsyncSession = Depends(get_db),
     redis_client=Depends(get_redis),
 ) -> None:
     """
     Stream live MASAC training metrics to the client.
-    Subscribes to Redis PubSub channel `pubsub:training:{job_id}`.
+    Requires a valid JWT passed as ?token=<access_token>.
 
     Messages:
       {"type": "step",      "step": 1500, "entropy": 3.2, ...}
       {"type": "converged", "step": 234100, "final_sharpe": 1.44, ...}
       {"type": "error",     "message": "..."}
     """
+    # Authenticate before accepting the connection
+    user = await get_ws_user(token, db)
+    if not user:
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+
     await websocket.accept()
     channel = f"pubsub:training:{job_id}"
     snapshot_key = f"training:snapshot:{job_id}"
@@ -42,14 +52,13 @@ async def training_stream(
         try:
             snap_data = json.loads(payload)
             if snap_data.get("type") in ("converged", "error"):
-                # Training already finished — nothing left to stream
                 return
         except json.JSONDecodeError:
             pass
 
     pubsub = redis_client.pubsub()
     await pubsub.subscribe(channel)
-    log.info("WS client subscribed to training stream", job_id=job_id)
+    log.info("WS client subscribed to training stream", job_id=job_id, user_id=user.id)
 
     try:
         async for message in pubsub.listen():
@@ -60,7 +69,6 @@ async def training_stream(
                 payload = payload.decode()
             await websocket.send_text(payload)
 
-            # Stop streaming on convergence or error
             try:
                 data = json.loads(payload)
                 if data.get("type") in ("converged", "error"):
@@ -76,5 +84,3 @@ async def training_stream(
     finally:
         await pubsub.unsubscribe(channel)
         await pubsub.close()
-
-
