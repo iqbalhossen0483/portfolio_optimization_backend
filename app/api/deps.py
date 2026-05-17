@@ -39,14 +39,6 @@ async def get_redis() -> aioredis.Redis:
 
 # ── Services ──────────────────────────────────────────────────────────────────
 
-async def get_portfolio_service(
-    db: AsyncSession = Depends(get_db),
-    redis_client: aioredis.Redis = Depends(get_redis),
-):
-    from app.services.portfolio_service import PortfolioService
-    return PortfolioService(db=db, redis_client=redis_client)
-
-
 async def get_training_service(
     db: AsyncSession = Depends(get_db),
     redis_client: aioredis.Redis = Depends(get_redis),

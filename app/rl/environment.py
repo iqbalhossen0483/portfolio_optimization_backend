@@ -15,9 +15,6 @@ Episode:
 from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
-import torch
-import torch.nn.functional as F
-
 from app.data.pipeline import ProcessedDataset
 from app.data.preprocessing.normalizer import DataNormalizer
 

@@ -7,7 +7,6 @@ No tanh squashing on actor output (Softmax accepts unbounded inputs directly).
 from __future__ import annotations
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.distributions import Normal
 
 

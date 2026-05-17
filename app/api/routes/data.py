@@ -33,7 +33,7 @@ async def list_assets(
     sector: str | None = Query(
         None,
         description="Filter by sector name (case-sensitive). Omit to return all sectors.",
-        example="Technology",
+        examples=["Technology"],
     ),
     db: AsyncSession = Depends(get_db),
 ) -> AssetsResponse:

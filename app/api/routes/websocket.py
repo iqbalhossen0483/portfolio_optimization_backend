@@ -4,7 +4,6 @@ WebSocket endpoints for real-time streaming:
   /ws/portfolio/{session_id} — interactive portfolio recalculation
 """
 from __future__ import annotations
-import asyncio
 import json
 
 import structlog
@@ -79,41 +78,3 @@ async def training_stream(
         await pubsub.close()
 
 
-@router.websocket("/portfolio/{session_id}")
-async def portfolio_stream(
-    websocket: WebSocket,
-    session_id: str,
-    redis_client=Depends(get_redis),
-) -> None:
-    """
-    Interactive portfolio session: client can update hyperparameters and
-    receive recomputed panels in real-time.
-
-    Client → Server: {"action": "update_weights", "hyperparams": {"beta": 0.6}}
-    Server → Client: {"type": "recomputed", "cooperative": {...}, ...}
-    """
-    await websocket.accept()
-    log.info("WS portfolio session opened", session_id=session_id)
-
-    try:
-        while True:
-            raw = await websocket.receive_text()
-            try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
-                await websocket.send_text(json.dumps({"type": "error", "message": "Invalid JSON"}))
-                continue
-
-            if msg.get("action") == "update_weights":
-                # Placeholder: re-run portfolio generation with updated hyperparams
-                await websocket.send_text(json.dumps({
-                    "type": "recomputed",
-                    "session_id": session_id,
-                    "message": "Hyperparams updated — recomputation triggered",
-                    "hyperparams": msg.get("hyperparams", {}),
-                }))
-
-    except WebSocketDisconnect:
-        log.info("WS portfolio session closed", session_id=session_id)
-    except Exception as exc:
-        log.error("WS portfolio session error", session_id=session_id, error=str(exc))

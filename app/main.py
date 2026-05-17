@@ -8,12 +8,11 @@ from contextlib import asynccontextmanager
 import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.openapi.utils import get_openapi
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.config import get_settings
 from app.core.database import create_tables
-from app.api.routes import portfolio, training, data, websocket
+from app.api.routes import training, data, websocket
 
 log = structlog.get_logger(__name__)
 cfg = get_settings()
@@ -38,20 +37,6 @@ TAGS_METADATA = [
         ),
     },
     {
-        "name": "portfolio",
-        "description": (
-            "**Portfolio generation and comparison.**\n\n"
-            "Runs three game-theoretic topologies — Cooperative, Competitive, Mixed — "
-            "concurrently using the best available trained MASAC model. "
-            "Returns three independent portfolio panels for side-by-side comparison.\n\n"
-            "| Topology | β penalty | Effect |\n"
-            "|---|---|---|\n"
-            "| Cooperative | full β | Agents penalised for ESG disagreement |\n"
-            "| Competitive | β = 0 | Each agent pursues its own ESG source |\n"
-            "| Mixed | partial β | Balanced between cooperation and competition |"
-        ),
-    },
-    {
         "name": "data",
         "description": (
             "**Asset and data management.**\n\n"
@@ -63,9 +48,7 @@ TAGS_METADATA = [
         "name": "websocket",
         "description": (
             "**Real-time WebSocket streams.**\n\n"
-            "- `WS /ws/training/{job_id}` — live MASAC step metrics via Redis PubSub\n"
-            "- `WS /ws/portfolio/{session_id}` — interactive hyperparameter updates + "
-            "instant portfolio recomputation"
+            "- `WS /ws/training/{job_id}` — live MASAC step metrics via Redis PubSub"
         ),
     },
     {
@@ -160,7 +143,6 @@ def create_app() -> FastAPI:
     Instrumentator().instrument(app).expose(app)
 
     api_prefix = "/api/v1"
-    app.include_router(portfolio.router, prefix=api_prefix)
     app.include_router(training.router,  prefix=api_prefix)
     app.include_router(data.router,      prefix=api_prefix)
     app.include_router(websocket.router)

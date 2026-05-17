@@ -93,19 +93,6 @@ class ModelCheckpoint(Base):
     job: Mapped[TrainingJob] = relationship(back_populates="checkpoints")
 
 
-class PortfolioResult(Base):
-    __tablename__ = "portfolios"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    query_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
-    job_id: Mapped[int | None] = mapped_column(ForeignKey("training_jobs.id"), nullable=True)
-    topology: Mapped[str] = mapped_column(String(32), nullable=False)
-    portfolio_model: Mapped[str] = mapped_column(String(8), nullable=False)
-    allocation_json: Mapped[dict] = mapped_column(JSON, nullable=False)
-    metrics_json: Mapped[dict] = mapped_column(JSON, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-
-
 class TrainingNormalizerParams(Base):
     """
     Frozen min/max parameters per (job, asset, feature) fitted on the training window.

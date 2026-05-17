@@ -174,8 +174,6 @@ class MASAC:
         }
 
         # Centralized inputs: concatenate all obs and all actions
-        all_obs     = obs.repeat(1, 1).expand(-1, -1)   # (B, 10N) — same obs for all critics
-        all_next_obs = next_obs.repeat(1, 1).expand(-1, -1)
         all_actions = torch.cat(list(actions.values()), dim=-1)   # (B, 3N)
 
         # Shared input tensors for critics

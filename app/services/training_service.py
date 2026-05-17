@@ -12,14 +12,13 @@ from __future__ import annotations
 from datetime import datetime, date
 from typing import Any
 
-import numpy as np
 import pandas as pd
 import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.domain import TrainingJob
-from app.models.schemas import TrainingRequest, TrainingStatus
+from app.models.schemas import TrainingRequest
 from app.config import get_settings
 
 log = structlog.get_logger(__name__)
@@ -67,7 +66,7 @@ class TrainingService:
 
         from app.workers.tasks import run_training_job
         import asyncio
-        await asyncio.to_thread(run_training_job.delay, job_id, config)
+        await asyncio.to_thread(run_training_job.delay, job_id, config)  # type: ignore[attr-defined]
 
         log.info("training_job_queued", job_id=job_id, topologies=topologies)
         return job_id
@@ -144,7 +143,7 @@ class TrainingService:
 
         from app.workers.tasks import run_training_job
         import asyncio
-        await asyncio.to_thread(run_training_job.delay, job_id, config)
+        await asyncio.to_thread(run_training_job.delay, job_id, config)  # type: ignore[attr-defined]
 
         log.info("stage4_queued", job_id=job_id, n_assets=len(isins),
                  topologies=topologies)

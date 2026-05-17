@@ -13,18 +13,18 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from datetime import datetime, date
+from datetime import datetime, date, timezone
+import structlog
+from celery import Celery
+
+from app.config import get_settings
+
 
 _root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _root not in sys.path:
     sys.path.insert(0, _root)
 
-import structlog
-from celery import Celery
 
-from celery.signals import task_failure, task_success
-
-from app.config import get_settings
 
 log = structlog.get_logger(__name__)
 cfg = get_settings()
@@ -42,8 +42,8 @@ celery_app.conf.update(
 )
 
 
-@celery_app.task(bind=True, name="run_training_job", max_retries=0)
-def run_training_job(self, job_id: int, config: dict) -> dict:
+@celery_app.task(name="run_training_job", max_retries=0)
+def run_training_job(job_id: int, config: dict) -> dict:
     """
     Main training entry point.  Runs each topology sequentially.
     """
@@ -64,11 +64,11 @@ async def _async_run_training(job_id: int, config: dict) -> dict:
     hp = config["hyperparams"]
     train_start = date.fromisoformat(config["train_start"])
     train_end   = date.fromisoformat(config["train_end"])
-    val_start   = date.fromisoformat(config["val_start"])
-    val_end     = date.fromisoformat(config["val_end"])
     isins       = config["assets"]
 
     # ── Data source selection ─────────────────────────────────────────────────
+    market_src: object
+    esg_src: object
     if config.get("data_source") == "database":
         from app.data.sources.database import (
             DatabaseMarketDataSource,
@@ -89,10 +89,6 @@ async def _async_run_training(job_id: int, config: dict) -> dict:
             isins, train_start, train_end,
             fit=False, normalizer=frozen_normalizer,
         )
-        val_ds = await pipeline.prepare(
-            isins, val_start, val_end,
-            fit=False, normalizer=frozen_normalizer,
-        )
     else:
         # Legacy path: yfinance + ESG stub (backward compat — non-XLSX jobs)
         from app.data.sources.market import MarketDataSource
@@ -108,10 +104,6 @@ async def _async_run_training(job_id: int, config: dict) -> dict:
         pipeline = DataPipeline(market_src, esg_src)
 
         train_ds = await pipeline.prepare(isins, train_start, train_end, fit=True)
-        val_ds   = await pipeline.prepare(
-            isins, val_start, val_end,
-            fit=False, normalizer=train_ds.normalizer,
-        )
 
     # ── Training loop ─────────────────────────────────────────────────────────
     results = []
@@ -120,7 +112,7 @@ async def _async_run_training(job_id: int, config: dict) -> dict:
         await db.execute(
             update(TrainingJob)
             .where(TrainingJob.id == job_id)
-            .values(status="running", started_at=datetime.utcnow())
+            .values(status="running", started_at=datetime.now(timezone.utc))
         )
         await db.commit()
 
@@ -157,7 +149,7 @@ async def _async_run_training(job_id: int, config: dict) -> dict:
             await db.execute(
                 update(TrainingJob)
                 .where(TrainingJob.id == job_id)
-                .values(status="completed", completed_at=datetime.utcnow())
+                .values(status="completed", completed_at=datetime.now(timezone.utc))
             )
             await db.commit()
 
@@ -168,7 +160,7 @@ async def _async_run_training(job_id: int, config: dict) -> dict:
                 update(TrainingJob)
                 .where(TrainingJob.id == job_id)
                 .values(status="failed", error_message=error_msg[:1024],
-                        completed_at=datetime.utcnow())
+                        completed_at=datetime.now(timezone.utc))
             )
             await db.commit()
             raise   # re-raise so Celery marks the task as FAILURE too
