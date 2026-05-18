@@ -10,6 +10,8 @@ Each session_id maps to a full conversation history across multiple requests.
 from __future__ import annotations
 
 import os
+from typing import AsyncGenerator
+
 import structlog
 
 from google.adk.agents.run_config import RunConfig
@@ -33,6 +35,19 @@ os.environ.setdefault("OTEL_SDK_DISABLED", "true")
 
 _session_service = DatabaseSessionService(db_url=cfg.postgres_dsn)
 _APP_NAME = "madrl_portfolio"
+
+_TOOL_LABELS: dict[str, str] = {
+    "generate_portfolio":    "Calculating portfolio...",
+    "list_available_models": "Checking trained models...",
+    "market_intelligence":   "Fetching market intelligence...",
+    "esg_research":          "Researching ESG data...",
+}
+
+_WORKING_LABELS: dict[str, str] = {
+    "portfolio_advisor":   "Thinking...",
+    "market_intelligence": "Fetching market intelligence...",
+    "esg_research":        "Researching ESG data...",
+}
 
 
 class ChatService:
@@ -94,5 +109,81 @@ class ChatService:
         return {
             "session_id": session_id,
             "response":   final_text,
+            "portfolio_result": self._portfolio_result if self._portfolio_result else None,
+        }
+
+    async def stream_chat(
+        self, session_id: str, message: str, user_id: str = "anonymous"
+    ) -> AsyncGenerator[dict, None]:
+        """
+        Async generator yielding SSE-ready dicts as the agent pipeline progresses.
+
+        Event shapes:
+          {"type": "status",     "status": "thinking"|"calling_tool", "agent": str, "tool": str|None, "label": str, "content": ""}
+          {"type": "text_chunk", "agent": str, "label": str, "content": str}
+          {"type": "done",       "session_id": str, "response": str, "portfolio_result": dict|None}
+        """
+        self._portfolio_result = {}
+
+        existing = await _session_service.get_session(
+            app_name=_APP_NAME,
+            user_id=user_id,
+            session_id=session_id,
+        )
+        if existing is None:
+            await _session_service.create_session(
+                app_name=_APP_NAME,
+                user_id=user_id,
+                session_id=session_id,
+            )
+
+        yield {
+            "type": "status", "status": "thinking",
+            "agent": "portfolio_advisor", "label": "Thinking...", "content": "",
+        }
+
+        new_message = Content(role="user", parts=[Part(text=message)])
+        final_text = ""
+
+        async for event in self._runner.run_async(
+            user_id=user_id,
+            session_id=session_id,
+            new_message=new_message,
+            run_config=RunConfig(max_llm_calls=25),
+        ):
+            # Tool calls being dispatched
+            for fc in event.get_function_calls():
+                tool_name = fc.name or ""
+                label = _TOOL_LABELS.get(tool_name, f"Calling {tool_name}...")
+                yield {
+                    "type": "status", "status": "calling_tool",
+                    "tool": tool_name, "agent": event.author,
+                    "label": label, "content": "",
+                }
+
+            # Partial text chunks — tagged with whichever agent is streaming
+            if event.partial and event.content and event.content.parts:
+                label = _WORKING_LABELS.get(event.author, "Working...")
+                for part in event.content.parts:
+                    if hasattr(part, "text") and part.text:
+                        yield {
+                            "type": "text_chunk",
+                            "agent": event.author,
+                            "label": label,
+                            "content": part.text,
+                        }
+
+            # Final response — capture the orchestrator's complete text
+            if event.is_final_response() and event.content and event.content.parts:
+                if event.author == "portfolio_advisor":
+                    final_text = "".join(
+                        p.text for p in event.content.parts
+                        if hasattr(p, "text") and p.text
+                    )
+
+        yield {
+            "type": "done",
+            "session_id": session_id,
+            "response": final_text,
             "portfolio_result": self._portfolio_result if self._portfolio_result else None,
         }

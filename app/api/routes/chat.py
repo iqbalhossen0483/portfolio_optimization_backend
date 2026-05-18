@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import uuid
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -296,3 +298,59 @@ async def chat(
         await db.rollback()
 
     return response
+
+
+@router.post(
+    "/stream",
+    summary="Streaming chat with live status notifications (SSE)",
+    description=(
+        "Server-Sent Events stream. Each line is `data: {json}\\n\\n`.\n\n"
+        "**Event types:**\n"
+        "- `status` — pipeline stage change (`thinking`, `calling_tool`). "
+        "Fields: `agent`, `tool` (only on calling_tool), `label`, `content` (empty string).\n"
+        "- `text_chunk` — partial text from an agent as it streams. "
+        "Fields: `agent`, `label`, `content` (the chunk text).\n"
+        "- `done` — terminal event. Fields: `session_id`, `response` (full text), "
+        "`portfolio_result` (panels or null).\n"
+        "- `error` — failure. Fields: `message`.\n\n"
+        "**Agent values:** `portfolio_advisor`, `market_intelligence`, `esg_research`.\n\n"
+        "Consume with `fetch` + `ReadableStream` (not native `EventSource`) "
+        "so the `Authorization: Bearer` header can be sent."
+    ),
+    status_code=200,
+)
+async def chat_stream(
+    request: ChatRequest,
+    user: User = Depends(get_current_user),
+    service: ChatService = Depends(get_chat_service),
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    session_id = request.session_id or str(uuid.uuid4())
+
+    async def event_generator():
+        final_response = ""
+        try:
+            async for event_dict in service.stream_chat(session_id, request.message, str(user.id)):
+                yield f"data: {json.dumps(event_dict)}\n\n"
+                if event_dict.get("type") == "done":
+                    final_response = event_dict.get("response", "")
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+            return
+
+        # Persist after the stream completes — failure never affects the already-sent stream
+        try:
+            chat_session = await _get_or_create_session(db, user.id, session_id, request.message)
+            db.add(ChatMessage(chat_session_id=chat_session.id, role="user",      content=request.message))
+            db.add(ChatMessage(chat_session_id=chat_session.id, role="assistant", content=final_response))
+            await db.execute(
+                sa_update(ChatSession)
+                .where(ChatSession.id == chat_session.id)
+                .values(updated_at=func.now())
+            )
+            await db.commit()
+        except Exception as persist_exc:
+            log.warning("stream_chat_persistence_failed", error=str(persist_exc), session_id=session_id)
+            await db.rollback()
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
