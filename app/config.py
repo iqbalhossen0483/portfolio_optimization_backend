@@ -32,8 +32,9 @@ class Settings(BaseSettings):
     alpha_vantage_api_key: str = ""
 
     # ADK
-    adk_model: str = "gemini-2.5-pro"          # portfolio advisor — complex reasoning & orchestration
-    adk_model_market: str = "gemini-2.5-flash"  # market intelligence — fast search & grounding
+    adk_model: str = "gemini-2.5-flash"              # portfolio advisor — orchestration & reasoning
+    adk_model_market: str = "gemini-2.5-flash-lite"  # market/esg sub-agents — search & grounding
+    adk_model_guard: str = "gemini-2.5-flash-lite"   # input rail classifier — simple classification
     google_api_key: str = ""
 
     # Model storage
