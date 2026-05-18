@@ -13,12 +13,10 @@ import json
 import os
 import structlog
 
-os.environ.setdefault("OTEL_SDK_DISABLED", "true")  # prevent asyncio context conflicts
-
 from google.adk.agents import LlmAgent
 from google.adk.agents.run_config import RunConfig
 from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
+from google.adk.sessions.database_session_service import DatabaseSessionService
 from google.genai.types import Content, Part
 
 from app.config import get_settings
@@ -31,10 +29,15 @@ cfg = get_settings()
 if cfg.google_api_key:
     os.environ.setdefault("GOOGLE_API_KEY", cfg.google_api_key)
 
+# prevent asyncio context conflicts with fastapi async context when ADK calls tools that access the database or other shared resources
+os.environ.setdefault("OTEL_SDK_DISABLED", "true") 
+
+# DatabaseSessionService requires a sync SQLAlchemy URL — strip the async driver prefix.
+_sync_dsn = cfg.postgres_dsn.replace("+asyncpg", "").replace("+aiopg", "")
+
 # Process-level singleton — preserves conversation history across requests
-_session_service = InMemorySessionService()
+_session_service = DatabaseSessionService(db_url=_sync_dsn)
 _APP_NAME = "madrl_portfolio"
-_USER_ID  = "madrl_user"
 
 _AGENT_INSTRUCTION = """
 You are the official portfolio advisor for the MADRL (Multi-Agent Deep Reinforcement Learning) Portfolio System.
@@ -442,24 +445,21 @@ class ChatService:
             session_service=_session_service,
         )
 
-    async def chat(self, session_id: str, message: str) -> dict:
+    async def chat(self, session_id: str, message: str, user_id: str = "anonymous") -> dict:
         """
         Send a message and return the agent's response + any generated portfolio data.
         """
         self._portfolio_result = {}
 
-        # user_id is a stable app-level identifier; session_id is the conversation UUID.
-        # InMemorySessionService stores sessions under sessions[app_name][user_id][session_id].
-        # Both must match exactly between create_session and run_async.
         existing = await _session_service.get_session(
             app_name=_APP_NAME,
-            user_id=_USER_ID,
+            user_id=user_id,
             session_id=session_id,
         )
         if existing is None:
             await _session_service.create_session(
                 app_name=_APP_NAME,
-                user_id=_USER_ID,
+                user_id=user_id,
                 session_id=session_id,
             )
 
@@ -467,7 +467,7 @@ class ChatService:
         final_text = ""
 
         async for event in self._runner.run_async(
-            user_id=_USER_ID,
+            user_id=user_id,
             session_id=session_id,
             new_message=new_message,
             run_config=RunConfig(max_llm_calls=10),

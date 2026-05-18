@@ -12,7 +12,7 @@ The chat layer is powered by **Google ADK 1.33** with **Gemini** as the underlyi
 
 ```
 POST /api/v1/chat
-  { "message": "I have $10M. Use Portfolio C.", "session_id": "optional-uuid" }
+  { "message": "I have $10M. suggest me where should i invest", "session_id": "optional-uuid" }
          │
          ▼
   ChatService.chat(session_id, message)
@@ -114,11 +114,11 @@ POST /api/v1/chat
 
 Panel keys in the response follow the pattern `{MODEL}_{topology}`:
 
-| Key | Meaning |
-|---|---|
+| Key             | Meaning                            |
+| --------------- | ---------------------------------- |
 | `C_cooperative` | Portfolio C — Cooperative topology |
 | `C_competitive` | Portfolio C — Competitive topology |
-| `C_mixed` | Portfolio C — Mixed topology |
+| `C_mixed`       | Portfolio C — Mixed topology       |
 
 If a user somehow triggers multiple model calls in one session the key would be `A_cooperative`, etc. The `portfolio_model` field at the top level is set to `"ALL"` in that case.
 
@@ -130,18 +130,18 @@ At inference time the system reads the **most recent available date** from `mark
 
 ### Feature order (matches training exactly)
 
-| Position | Feature | DB Column | Normalization |
-|---|---|---|---|
-| 0 … N-1 | Open | `market_data.open` | Time-series min-max (frozen) |
-| N … 2N-1 | High | `market_data.high` | Time-series min-max (frozen) |
-| 2N … 3N-1 | Low | `market_data.low` | Time-series min-max (frozen) |
-| 3N … 4N-1 | Close | `market_data.close` | Time-series min-max (frozen) |
-| 4N … 5N-1 | Volume | `market_data.volume` | Time-series min-max (frozen) |
-| 5N … 6N-1 | RSI | `market_data.rsi` | Time-series min-max (frozen) |
-| 6N … 7N-1 | MACD histogram | `market_data.macd_hist` | Time-series min-max (frozen) |
-| 7N … 8N-1 | Individual return R_i,t | `market_data.return_pct` | Time-series min-max (frozen) |
-| 8N … 9N-1 | ΔESG per stock | `esg_scores.delta_esg` | Cross-sectional (Stage 2, pre-computed) |
-| 9N … 10N-1 | μESG per stock | `esg_scores.mu_esg` | Cross-sectional (Stage 2, pre-computed) |
+| Position   | Feature                 | DB Column                | Normalization                           |
+| ---------- | ----------------------- | ------------------------ | --------------------------------------- |
+| 0 … N-1    | Open                    | `market_data.open`       | Time-series min-max (frozen)            |
+| N … 2N-1   | High                    | `market_data.high`       | Time-series min-max (frozen)            |
+| 2N … 3N-1  | Low                     | `market_data.low`        | Time-series min-max (frozen)            |
+| 3N … 4N-1  | Close                   | `market_data.close`      | Time-series min-max (frozen)            |
+| 4N … 5N-1  | Volume                  | `market_data.volume`     | Time-series min-max (frozen)            |
+| 5N … 6N-1  | RSI                     | `market_data.rsi`        | Time-series min-max (frozen)            |
+| 6N … 7N-1  | MACD histogram          | `market_data.macd_hist`  | Time-series min-max (frozen)            |
+| 7N … 8N-1  | Individual return R_i,t | `market_data.return_pct` | Time-series min-max (frozen)            |
+| 8N … 9N-1  | ΔESG per stock          | `esg_scores.delta_esg`   | Cross-sectional (Stage 2, pre-computed) |
+| 9N … 10N-1 | μESG per stock          | `esg_scores.mu_esg`      | Cross-sectional (Stage 2, pre-computed) |
 
 The frozen normalizer clips values to [0, 1] — values slightly outside the training range are clamped, not rejected.
 
@@ -166,11 +166,11 @@ Deterministic mode uses the actor mean directly — no sampling noise. Identical
 
 All three topologies receive the **same** 10N state vector. Differences emerge entirely from how each topology trained its agents under a different reward structure:
 
-| Topology | β in reward | Effect on high-ΔESG stocks |
-|---|---|---|
-| Cooperative | β > 0 (full shared penalty) | All agents penalized — suppresses high-ΔESG allocation |
-| Competitive | β = 0 (no penalty) | Bloomberg + Financial agents may independently favour high-ΔESG stocks |
-| Mixed | β × 0.5 (partial penalty) | Intermediate — moderates the competitive risk appetite |
+| Topology    | β in reward                 | Effect on high-ΔESG stocks                                             |
+| ----------- | --------------------------- | ---------------------------------------------------------------------- |
+| Cooperative | β > 0 (full shared penalty) | All agents penalized — suppresses high-ΔESG allocation                 |
+| Competitive | β = 0 (no penalty)          | Bloomberg + Financial agents may independently favour high-ΔESG stocks |
+| Mixed       | β × 0.5 (partial penalty)   | Intermediate — moderates the competitive risk appetite                 |
 
 ---
 
@@ -200,20 +200,20 @@ Each topology panel is a list sorted by weight descending:
   "sharpe": 1.83,
   "mu_esg": 0.93,
   "delta_esg": 0.14,
-  "weight": 0.40,
+  "weight": 0.4,
   "allocation": 4000000.0
 }
 ```
 
-| Field | Meaning |
-|---|---|
-| `return_ann` | Annualised simple return = mean(daily return_pct) × 252 |
-| `risk` | Annualised std = std(daily return_pct) × √252 |
-| `sharpe` | `return_ann / (risk + ε)`, risk-free rate = 0 |
-| `mu_esg` | Per-stock ESG consensus = (esg_b_norm + esg_l_norm) / 2 at most recent date |
-| `delta_esg` | Per-stock ESG disagreement = \|esg_b_norm − esg_l_norm\| at most recent date |
-| `weight` | Portfolio weight ∈ [0, 1]; all N weights sum to 1.0 |
-| `allocation` | `weight × investment_amount` in USD |
+| Field        | Meaning                                                                      |
+| ------------ | ---------------------------------------------------------------------------- |
+| `return_ann` | Annualised simple return = mean(daily return_pct) × 252                      |
+| `risk`       | Annualised std = std(daily return_pct) × √252                                |
+| `sharpe`     | `return_ann / (risk + ε)`, risk-free rate = 0                                |
+| `mu_esg`     | Per-stock ESG consensus = (esg_b_norm + esg_l_norm) / 2 at most recent date  |
+| `delta_esg`  | Per-stock ESG disagreement = \|esg_b_norm − esg_l_norm\| at most recent date |
+| `weight`     | Portfolio weight ∈ [0, 1]; all N weights sum to 1.0                          |
+| `allocation` | `weight × investment_amount` in USD                                          |
 
 ---
 
@@ -247,11 +247,11 @@ Queries `training_jobs WHERE status = "completed"` and returns job IDs, portfoli
 
 ### Model routing rules (enforced by agent instruction)
 
-| User says | Model used |
-|---|---|
-| "model A" / "portfolio A" | `"A"` |
-| "model B" / "portfolio B" | `"B"` |
-| Anything else (including "best", "recommended", "full", "default", unspecified) | `"C"` |
+| User says                                                                       | Model used |
+| ------------------------------------------------------------------------------- | ---------- |
+| "model A" / "portfolio A"                                                       | `"A"`      |
+| "model B" / "portfolio B"                                                       | `"B"`      |
+| Anything else (including "best", "recommended", "full", "default", unspecified) | `"C"`      |
 
 The agent **never asks** which model to use. It never explains the fallback logic unless directly asked.
 
@@ -290,6 +290,7 @@ if cfg.google_api_key:
 ### `POST /api/v1/chat`
 
 **Request:**
+
 ```json
 {
   "message": "I have $10,000,000 to allocate. Use Portfolio C.",
@@ -300,6 +301,7 @@ if cfg.google_api_key:
 - `session_id`: omit on first message — the server generates and returns one. Include on all follow-up messages to continue the same conversation.
 
 **Response:**
+
 ```json
 {
   "session_id": "3f7a2b1c-...",
@@ -336,10 +338,10 @@ If no completed job exists for the requested model, the agent falls back to mode
 
 ## Configuration
 
-| Setting | .env key | Default | Purpose |
-|---|---|---|---|
-| `adk_model` | `ADK_MODEL` | `gemini-2.5-flash-lite` | Gemini model used by the ADK agent |
-| `google_api_key` | `GOOGLE_API_KEY` | *(required)* | Google API key — set in `.env`, injected into `os.environ` at startup |
-| `model_store_path` | `MODEL_STORE_PATH` | `./model_store` | Filesystem root for `.pt` checkpoint files |
+| Setting            | .env key           | Default                 | Purpose                                                               |
+| ------------------ | ------------------ | ----------------------- | --------------------------------------------------------------------- |
+| `adk_model`        | `ADK_MODEL`        | `gemini-2.5-flash-lite` | Gemini model used by the ADK agent                                    |
+| `google_api_key`   | `GOOGLE_API_KEY`   | _(required)_            | Google API key — set in `.env`, injected into `os.environ` at startup |
+| `model_store_path` | `MODEL_STORE_PATH` | `./model_store`         | Filesystem root for `.pt` checkpoint files                            |
 
 > `OTEL_SDK_DISABLED=true` is set in Python code at module load — do **not** add it to `.env` as it causes a Pydantic validation error (`Extra inputs are not permitted`).

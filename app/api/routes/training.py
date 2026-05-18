@@ -14,7 +14,7 @@ from datetime import date
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 
-from app.api.deps import get_current_user, get_training_service, require_admin
+from app.api.deps import get_training_service, require_admin
 from app.models.schemas import (
     HyperParams, TrainingJobResponse, TrainingStatusResponse, TrainingStatus,
     PortfolioModel, Topology,
@@ -206,7 +206,7 @@ async def start_training(
 )
 async def get_training_status(
     job_id: int,
-    _: object = Depends(get_current_user),
+    _: object = Depends(require_admin),
     service: TrainingService = Depends(get_training_service),
 ) -> TrainingStatusResponse:
     data = await service.get_status(job_id)

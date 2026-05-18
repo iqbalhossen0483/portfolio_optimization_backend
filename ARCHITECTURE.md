@@ -1,611 +1,620 @@
-# MADRL Portfolio System — Full Architecture & Design
+# MADRL Portfolio System — Architecture & Design
 
 ## 1. System Overview
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                          MADRL Portfolio Platform                           │
-│                                                                             │
-│  ┌──────────┐   REST/WS   ┌──────────────────────────────────────────────┐ │
-│  │  Client  │◄───────────►│           FastAPI Gateway                    │ │
-│  │ (UI/API) │             │  /portfolio  /training  /data  /ws           │ │
-│  └──────────┘             └──────────────┬───────────────────────────────┘ │
-│                                          │                                  │
-│              ┌───────────────────────────▼──────────────────────────────┐  │
-│              │              ADK Orchestration Layer                      │  │
-│              │                                                           │  │
-│              │  ┌─────────────────────────────────────────────────────┐ │  │
-│              │  │          PortfolioOrchestratorAgent (ADK)            │ │  │
-│              │  │                                                       │ │  │
-│              │  │   ┌──────────────┐  ┌──────────────┐  ┌──────────┐  │ │  │
-│              │  │   │ Bloomberg    │  │   LESG       │  │Financial │  │ │  │
-│              │  │   │ ESGAgent     │  │  ESGAgent    │  │  Agent   │  │ │  │
-│              │  │   │ (ADK)        │  │  (ADK)       │  │  (ADK)   │  │ │  │
-│              │  │   │ α₁·ESG^(B)  │  │  α₂·ESG^(L) │  │  α₃≈0   │  │ │  │
-│              │  │   └──────┬───────┘  └──────┬───────┘  └────┬─────┘  │ │  │
-│              │  │          │                  │               │        │ │  │
-│              │  │          └──────────────────┴───────────────┘        │ │  │
-│              │  │                        │ z_joint = avg(z^B,z^L,z^F)  │ │  │
-│              │  │                   Softmax(z_joint) → weights          │ │  │
-│              │  └─────────────────────────────────────────────────────┘ │  │
-│              │                                                           │  │
-│              │  ┌─────────────────┐  ┌─────────────────────────────┐    │  │
-│              │  │  Training Agent │  │   Data Ingestion Agent       │    │  │
-│              │  │  (ADK)          │  │   (ADK)                     │    │  │
-│              │  └─────────────────┘  └─────────────────────────────┘    │  │
-│              └───────────────────────────┬───────────────────────────────┘  │
-│                                          │                                  │
-│         ┌────────────────────────────────▼──────────────────────────────┐  │
-│         │                      Service Layer                             │  │
-│         │   PortfolioService  │  TrainingService  │  InferenceService   │  │
-│         └────────┬───────────────────┬──────────────────────┬───────────┘  │
-│                  │                   │                       │             │
-│    ┌─────────────▼───┐  ┌────────────▼────────┐  ┌──────────▼──────────┐  │
-│    │   RL Engine     │  │   Data Pipeline     │  │   Storage Layer     │  │
-│    │                 │  │                     │  │                     │  │
-│    │  ┌───────────┐  │  │  ┌──────────────┐  │  │  ┌───────────────┐  │  │
-│    │  │   MASAC   │  │  │  │  Market API  │  │  │  │  PostgreSQL   │  │  │
-│    │  │ Algorithm │  │  │  │  ESG API     │  │  │  │  (Portfolio,  │  │  │
-│    │  ├───────────┤  │  │  ├──────────────┤  │  │  │   Training,   │  │  │
-│    │  │ 3 Actors  │  │  │  │  Normalizer  │  │  │  │   Results)    │  │  │
-│    │  │ 6 Critics │  │  │  │  RSI/MACD    │  │  │  └───────────────┘  │  │
-│    │  ├───────────┤  │  │  └──────────────┘  │  │  ┌───────────────┐  │  │
-│    │  │  Replay   │  │  └────────────────────┘  │  │     Redis     │  │  │
-│    │  │  Buffer   │  │                          │  │  (Cache/PubSub│  │  │
-│    │  └───────────┘  │                          │  │   /Sessions)  │  │  │
-│    │                 │  ┌──────────────────────┐ │  └───────────────┘  │  │
-│    │  Market         │  │  Celery Workers      │ │  ┌───────────────┐  │  │
-│    │  Environment    │  │  (Background Train)  │ │  │  Model Store  │  │  │
-│    └─────────────────┘  └──────────────────────┘ │  │  (File/S3)   │  │  │
-│                                                   │  └───────────────┘  │  │
-│                                                   └─────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                         MADRL Portfolio Platform                              │
+│                                                                               │
+│  ┌──────────┐  REST / WS   ┌──────────────────────────────────────────────┐  │
+│  │  Client  │◄────────────►│               FastAPI Gateway                 │  │
+│  │(UI / API)│              │  /auth  /training  /data  /chat  /ws         │  │
+│  └──────────┘              └────────────────┬─────────────────────────────┘  │
+│                                             │  JWT Bearer auth on all routes  │
+│                            ┌────────────────┼────────────────────┐            │
+│                            │                │                    │            │
+│                  ┌─────────▼──────┐ ┌───────▼──────┐ ┌──────────▼────────┐  │
+│                  │ TrainingService│ │  ChatService  │ │ InferenceService  │  │
+│                  │ (4-stage XLSX  │ │  (Google ADK  │ │ (loads .pt model  │  │
+│                  │  pipeline +    │ │   LlmAgent +  │ │  weights, builds  │  │
+│                  │  Celery queue) │ │   Gemini LLM) │ │  10N state vec,   │  │
+│                  └────────┬───────┘ └──────┬────────┘ │  runs actors)     │  │
+│                           │                │          └────────────────────┘  │
+│         ┌─────────────────▼────────────────▼──────────────────┐              │
+│         │                      RL Engine (MASAC)               │              │
+│         │  3 Actor networks + 6 Critics (twin Q per agent)     │              │
+│         │  Shared ReplayBuffer (1M capacity)                   │              │
+│         │  3 Topologies: cooperative / competitive / mixed      │              │
+│         └──────────────────────────┬─────────────────────────┘              │
+│                                    │                                          │
+│         ┌──────────────────────────▼─────────────────────────┐               │
+│         │                   Storage Layer                      │               │
+│         │  PostgreSQL  ←→  Redis (cache + PubSub + sessions)  │               │
+│         │  model_store/{job_id}/{topology}/*.pt               │               │
+│         └────────────────────────────────────────────────────┘               │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 2. Interaction Topologies — Parallel Execution
+## 2. Authentication
 
-All three game-theoretic topologies run simultaneously for every query. Each produces
-an independent portfolio recommendation returned side-by-side to the user.
+Every API endpoint (except `/auth/register` and `/auth/login`) requires a JWT Bearer token.
+The system has two roles: **user** and **admin**.
 
 ```
-User Query (Portfolio C, $10M)
-          │
-          ▼
-┌─────────────────────────────────────────────────────────┐
-│              PortfolioOrchestratorAgent                  │
-│                                                         │
-│  spawn_topology("cooperative")  ─────────────────────► │─► Panel 1
-│  spawn_topology("competitive")  ─────────────────────► │─► Panel 2
-│  spawn_topology("mixed")        ─────────────────────► │─► Panel 3
-│                                                         │
-│  [all three run concurrently via asyncio.gather]        │
-└─────────────────────────────────────────────────────────┘
+POST /api/v1/auth/register      — public — create account (role = "user" by default)
+POST /api/v1/auth/login         — public — returns JWT access token (24h expiry, HS256)
+GET  /api/v1/auth/me            — any user  — own profile
+PUT  /api/v1/auth/me            — any user  — update email / username / password
+GET  /api/v1/auth/users         — admin     — list all users
+PUT  /api/v1/auth/users/{id}/role — admin   — promote / demote a user
+
+Role-based access:
+
+| Endpoint                          | user | admin |
+|-----------------------------------|------|-------|
+| POST /auth/register               | ✓    | ✓     |
+| POST /auth/login                  | ✓    | ✓     |
+| GET  /auth/me                     | ✓    | ✓     |
+| PUT  /auth/me                     | ✓    | ✓     |
+| GET  /auth/users                  | ✗    | ✓     |
+| PUT  /auth/users/{id}/role        | ✗    | ✓     |
+| POST /training/start              | ✗    | ✓     |
+| GET  /training/{id}/status        | ✗    | ✓     |
+| POST /training/{id}/stop          | ✗    | ✓     |
+| GET  /data/assets                 | ✗    | ✓     |
+| POST /chat                        | ✓    | ✓     |
+| WS   /ws/training/{id}?token=...  | ✗    | ✓     |
 ```
 
-**Reward function by topology:**
-
-| Topology    | β applied?           | Portfolio A             | Portfolio B           | Portfolio C                           |
-|-------------|----------------------|-------------------------|-----------------------|---------------------------------------|
-| Cooperative | β > 0 (full penalty) | rₜ + αᵢ·ESGᵢ           | rₜ ± λ·ΔESG_signed   | rₜ + αᵢ·ESGᵢ − β·ΔESGₜ              |
-| Competitive | β = 0                | rₜ + αᵢ·ESGᵢ           | rₜ ± λ·ΔESG_signed   | rₜ + αᵢ·ESGᵢ                         |
-| Mixed       | 0 < β_partial < β    | rₜ + αᵢ·ESGᵢ           | rₜ ± λ·ΔESG_signed   | rₜ + αᵢ·ESGᵢ − β_partial·ΔESGₜ      |
+**JWT claims:** `{ sub: user_id, email, role, exp }`
+**WebSocket auth:** token passed as query param `?token=<jwt>` (HTTP `Authorization` header
+is not available over the WS handshake in browsers).
 
 ---
 
-## 3. Component Architecture
+## 3. Interaction Topologies
 
-### 3.1 FastAPI Gateway
-
-```
-app/
-├── main.py                         # App factory, lifespan events
-├── config.py                       # Pydantic Settings (env-driven)
-└── api/
-    ├── deps.py                     # DI: db, redis, services
-    └── routes/
-        ├── portfolio.py            # POST /portfolio/generate
-        │                           # GET  /portfolio/{id}
-        │                           # GET  /portfolio/{id}/comparison
-        ├── training.py             # POST /training/start
-        │                           # GET  /training/{job_id}/status
-        │                           # POST /training/{job_id}/stop
-        ├── data.py                 # POST /data/ingest
-        │                           # GET  /data/assets
-        │                           # GET  /data/health
-        └── websocket.py            # WS  /ws/training/{job_id}
-                                    # WS  /ws/portfolio/{session_id}
-```
-
-### 3.2 ADK Agent Layer
+All three game-theoretic topologies are trained sequentially per job and run at inference
+time for every chat request, producing three side-by-side portfolio panels.
 
 ```
-agents/
-├── base.py                         # BasePortfolioAgent (ADK Agent subclass)
-│                                   # — shared tools: fetch_state, log_decision
-├── bloomberg_agent.py              # BloombergESGAgent
-│                                   # — tool: compute_bloomberg_scores(state) → z^(B)
-│                                   # — reward: rₜ + α₁·ESG^(B) [− β·ΔESGₜ if coop]
-├── lesg_agent.py                   # LESGAgent
-│                                   # — tool: compute_lesg_scores(state) → z^(L)
-│                                   # — reward: rₜ + α₂·ESG^(L) [− β·ΔESGₜ if coop]
-├── financial_agent.py              # FinancialAgent
-│                                   # — tool: compute_financial_scores(state) → z^(F)
-│                                   # — reward: rₜ  (α₃ ≈ 0)
-└── portfolio_orchestrator.py       # PortfolioOrchestratorAgent
-                                    # — sub_agents: [Bloomberg, LESG, Financial]
-                                    # — tool: aggregate_scores(z^B, z^L, z^F) → weights
-                                    # — tool: run_topology(mode, portfolio_model) → panel
-                                    # — tool: generate_comparison() → 3 panels
+Training (per job): cooperative → competitive → mixed   (sequential)
+Inference (chat):   cooperative + competitive + mixed    (all three, same state vector)
 ```
 
-### 3.3 RL Engine (MASAC)
+**Reward function by topology and model:**
+
+| Topology    | β applied        | Portfolio A             | Portfolio B                     | Portfolio C                            |
+|-------------|------------------|-------------------------|---------------------------------|----------------------------------------|
+| Cooperative | β (full)         | rₜ + α₁·ESG_B          | rₜ + λ·(ESG_B − ESG_L)         | rₜ + α₁·ESG_B_norm − β·ΔESGₜ         |
+| Competitive | 0 (none)         | rₜ + α₁·ESG_B          | rₜ + λ·(ESG_B − ESG_L)         | rₜ + α₁·ESG_B_norm                    |
+| Mixed       | β × 0.5 (partial)| rₜ + α₁·ESG_B          | rₜ + λ·(ESG_B − ESG_L)         | rₜ + α₁·ESG_B_norm − 0.5·β·ΔESGₜ    |
+
+---
+
+## 4. File Structure
 
 ```
-rl/
-├── networks.py                     # ActorNetwork, CriticNetwork (PyTorch)
-│                                   # Input: 10N features | Output: μ_π, log σ²
-├── masac.py                        # MASACAgent: owns 1 Actor + 2 Critics each
-│                                   # 3 agents × (1 Actor + 2 Critics + 2 targets)
-│                                   # = 3 Actors + 12 networks total
-├── replay_buffer.py                # UniformReplayBuffer, capacity=1M
-│                                   # stores (s,a^B,a^L,a^F,r^B,r^L,r^F,s')
-├── environment.py                  # MarketEnvironment (Gym-compatible)
-│                                   # — step(actions) → (obs, rewards, done, info)
-│                                   # — reset() → initial_state
-│                                   # — topology: "cooperative"|"competitive"|"mixed"
-└── trainer.py                      # TrainingOrchestrator
-                                    # — runs 500k steps max
-                                    # — early stop: rolling std entropy < 0.01
-                                    # — emits events to Redis PubSub
-```
-
-### 3.4 Data Pipeline
-
-```
-data/
-├── sources/
-│   ├── market.py                   # MarketDataSource
-│   │                               # — fetch_ohlcv(isin, start, end) → DataFrame
-│   │                               # — supports: yfinance, Bloomberg API, Alpha Vantage
-│   └── esg.py                      # ESGDataSource
-│                                   # — fetch_bloomberg_esg(isin, date) → score (0-100)
-│                                   # — fetch_lesg_esg(isin, date) → score (0-10)
-├── preprocessing/
-│   ├── normalizer.py               # MinMaxNormalizer
-│   │                               # — cross_sectional(esg_matrix) → normed per-day
-│   │                               # — time_series(feature_matrix, window) → normed per-asset
-│   │                               # — freeze/unfreeze for train/test split
-│   └── indicators.py               # TechnicalIndicators
-│                                   # — rsi(prices, period=14) → Series
-│                                   # — macd_histogram(prices, 12, 26, 9) → Series
-└── pipeline.py                     # DataPipeline
-                                    # orchestrates source → preprocess → validate
-                                    # enforces train/test split discipline
-```
-
-### 3.5 Storage Layer
-
-```
-PostgreSQL schema:
-├── assets          (isin, sector, name, created_at)
-├── market_data     (asset_id, date, open, high, low, close, volume)
-├── esg_scores      (asset_id, date, bloomberg_score, lesg_score)
-├── training_jobs   (id, status, model_type, topology, started_at, config_json)
-├── model_checkpoints (job_id, step, path, sharpe, mu_esg, entropy, saved_at)
-├── portfolios      (id, job_id, topology, model_type, allocation_json, metrics_json)
-└── query_results   (id, query_json, cooperative_id, competitive_id, mixed_id, created_at)
-
-Redis usage:
-├── cache:market:{isin}:{date}      TTL 1h  — raw OHLCV
-├── cache:esg:{isin}:{date}         TTL 24h — ESG scores
-├── cache:state:{isin}:{window}     TTL 6h  — normalized state
-├── pubsub:training:{job_id}        — step metrics streamed to WS clients
-└── session:{session_id}            TTL 1h  — active portfolio sessions
+madrl_portfolio/
+├── ARCHITECTURE.md
+├── CHAT_PROCESS.md
+├── TRAINING_PROCESS.md
+├── requirements.txt
+├── requirements.md          (system specification)
+├── app/
+│   ├── main.py              — FastAPI factory; registers all routers; lifespan
+│   ├── config.py            — Pydantic Settings (env-driven; JWT, MASAC, DB params)
+│   ├── api/
+│   │   ├── deps.py          — DI: get_db, get_redis, get_current_user, require_admin,
+│   │   │                        get_ws_user, get_training_service, get_chat_service
+│   │   └── routes/
+│   │       ├── auth.py      — register, login, me (GET/PUT), users (admin)
+│   │       ├── training.py  — POST /start (admin), GET /{id}/status, POST /{id}/stop (admin)
+│   │       ├── data.py      — GET /assets (any user), GET /health
+│   │       ├── chat.py      — POST /chat (any user) → ADK agent → inference panels
+│   │       └── websocket.py — WS /ws/training/{job_id}?token=<jwt>
+│   ├── core/
+│   │   ├── database.py      — AsyncEngine, async_sessionmaker, create_tables()
+│   │   └── security.py      — hash_password, verify_password, create_access_token,
+│   │                           decode_token (HS256 via python-jose + passlib[bcrypt])
+│   ├── models/
+│   │   ├── domain.py        — SQLAlchemy ORM: User, Asset, MarketData, ESGScore,
+│   │   │                        TrainingJob, ModelCheckpoint, TrainingNormalizerParams
+│   │   └── schemas.py       — Pydantic schemas for all API request/response bodies
+│   ├── services/
+│   │   ├── training_service.py   — 4-stage ingestion pipeline; Celery dispatch
+│   │   ├── chat_service.py       — Google ADK LlmAgent; session management; tool dispatch
+│   │   └── inference_service.py  — loads checkpoint; builds state vector; runs actors
+│   ├── data/
+│   │   ├── sources/
+│   │   │   ├── xlsx.py      — XLSXDataSource: parse files, compute return_pct + macd_hist
+│   │   │   └── database.py  — DatabaseMarketDataSource + DatabaseESGDataSource
+│   │   ├── preprocessing/
+│   │   │   ├── normalizer.py — DataNormalizer: time-series min-max per asset;
+│   │   │   │                    fit_transform, transform_market_only, to_param_records,
+│   │   │   │                    load_from_db (reconstructs frozen scaler from DB)
+│   │   │   └── indicators.py — compute_rsi, compute_macd_histogram (fallback only;
+│   │   │                         DB path skips these — RSI from XLSX, MACD pre-computed)
+│   │   └── pipeline.py      — DataPipeline.prepare(): aligns dates, drops MACD warmup
+│   │                           rows, applies normalizer, assembles ProcessedDataset
+│   ├── rl/
+│   │   ├── networks.py      — ActorNetwork (10N → 256 → 256 → μ,log_σ, no tanh)
+│   │   │                       CriticNetwork (33N → 256 → 256 → Q, twin)
+│   │   ├── masac.py         — MASAC: owns 3 actors + 6 critics + 6 targets +
+│   │   │                       3 log_alpha_t; select_actions, update, save, load
+│   │   ├── replay_buffer.py — UniformReplayBuffer: capacity 1M, stores
+│   │   │                       (obs, a^B, a^L, a^F, r^B, r^L, r^F, next_obs, done)
+│   │   ├── environment.py   — MarketEnvironment: step(), reset(); reward A/B/C;
+│   │   │                       _effective_beta() per topology
+│   │   └── trainer.py       — TrainingOrchestrator: 500k-step loop; warmup; convergence
+│   │                           check; checkpoint selection on val Sharpe; Redis publish
+│   └── workers/
+│       ├── tasks.py         — Celery task run_training_job: loads DB sources + frozen
+│       │                       normalizer; passes val_dataset to TrainingOrchestrator
+│       └── __init__.py
 ```
 
 ---
 
-## 4. Data Flow: End-to-End
+## 5. Data Pipeline — 4 Stages
 
-### 4.1 Training Data Flow
-
-```
-Market API → fetch_ohlcv()
-                │
-                ▼
-ESG APIs   → fetch_bloomberg_esg() + fetch_lesg_esg()
-                │
-                ▼
-        ┌───────────────────────────────────┐
-        │         DataPipeline              │
-        │                                   │
-        │  1. Cross-sectional ESG norm:     │
-        │     ESG_norm(i,t) across N assets │
-        │     per day t  (no look-ahead)    │
-        │                                   │
-        │  2. Compute per-stock:            │
-        │     ΔESGᵢₜ = |ESG^B - ESG^L|     │
-        │     μESGᵢₜ = (ESG^B + ESG^L)/2   │
-        │                                   │
-        │  3. Time-series norm (per asset,  │
-        │     training window W only):      │
-        │     Close, OHLCV, Rᵢₜ            │
-        │     RSI(14), MACD histogram(26)   │
-        │     Freeze min/max before test    │
-        │                                   │
-        │  4. Warm-up: skip first 26 days   │
-        └───────────────────────────────────┘
-                │
-                ▼
-        State vector per asset: 10N features
-        [OHLCV(5N), RSI(N), MACD(N), Rᵢₜ(N), ΔESGᵢ(N), μESGᵢ(N)]
-                │
-                ▼
-         MarketEnvironment → ReplayBuffer → MASAC Training
-```
-
-### 4.2 Inference (Portfolio Generation) Flow
+### Stage 1 — XLSX Parsing & Raw Storage
 
 ```
-User Request
-    │
-    ▼
-PortfolioOrchestratorAgent.generate_comparison(
-    model=PortfolioC, amount=$10M, assets=[...]
-)
-    │
-    ├─ asyncio.gather([
-    │     run_topology("cooperative"),
-    │     run_topology("competitive"),
-    │     run_topology("mixed")
-    │  ])
-    │
-    │  Each topology:
-    │    1. Load trained actor weights (from model store)
-    │    2. Fetch + preprocess current market state
-    │    3. BloombergAgent.compute_bloomberg_scores(state) → z^(B)
-    │    4. LESGAgent.compute_lesg_scores(state)          → z^(L)
-    │    5. FinancialAgent.compute_financial_scores(state) → z^(F)
-    │    6. z_joint = (z^B + z^L + z^F) / 3
-    │    7. weights = softmax(z_joint)
-    │    8. Compute portfolio metrics (return, σ, Sharpe, μESG, ΔESG)
-    │    9. Scale to user's allocation amount
-    │
-    ▼
-ComparisonResponse {
-    cooperative: Panel,   ← β > 0, full shared penalty
-    competitive: Panel,   ← β = 0, no shared penalty
-    mixed: Panel          ← 0 < β_partial < β
-}
+POST /api/v1/training/start  (multipart: .xlsx files + form fields)
+         │
+         ▼
+XLSXDataSource.parse_files(paths)
+  ├── Sheet: Stock_ESG_Dataset
+  ├── Columns: Date | ISIN | Company name | Sector | Open | High | Low | Close
+  │            | Volume | RSI | Bloom. ESG (0-100) | LESG ESG (0-10)
+  ├── Volume parsed: "10.5M" → 10,500,000  (K/M/B/T, case-insensitive)
+  ├── RSI: read as-is from XLSX (NOT recomputed)
+  ├── return_pct = df.groupby("isin")["close"].pct_change()   ← NULL for first row/ISIN
+  ├── macd_hist  = MACD(close, fast=12, slow=26, signal=9)     ← NULL for first 25 rows/ISIN
+  └── Dedup on (ISIN, Date) — safe to upload overlapping files
+         │
+         ▼
+Bulk upsert to PostgreSQL (ON CONFLICT DO UPDATE):
+  ├── assets                  (isin, name, sector)
+  ├── market_data             (ohlcv, rsi, return_pct, macd_hist)
+  └── esg_scores              (bloomberg_score, lesg_score — raw)
 ```
 
----
+### Stage 2 — Cross-Sectional ESG Normalization
 
-## 5. Reward Function Implementation Matrix
+```
+For each date t, across all N ISINs:
+  ESG_B_norm(i,t) = (ESG_B(i,t) − min_i ESG_B(t)) / (max_i ESG_B(t) − min_i ESG_B(t))
+  ESG_L_norm(i,t) = same formula for LESG
+  delta_esg(i,t)  = |ESG_B_norm − ESG_L_norm|   ← ESG disagreement
+  mu_esg(i,t)     = (ESG_B_norm + ESG_L_norm) / 2  ← ESG consensus
 
-### Portfolio A — ESG Consensus Baseline
-
-```python
-# Agent 1 (Bloomberg):  R = r_t + α₁ · ESG_t^(B)
-# Agent 2 (LESG):       R = r_t + α₂ · ESG_t^(L)
-# Agent 3 (Financial):  R = r_t  (α₃ ≈ 0)
-# β = 0 in all topologies for Portfolio A
-
-def reward_A(r_t, esg_portfolio, alpha, topology, beta=0.0):
-    penalty = -beta * delta_esg_t if topology == "cooperative" else 0.0
-    return r_t + alpha * esg_portfolio + penalty
+Implementation: df.groupby("date").transform(cs_norm) — one pandas pass over all N assets
+Result: bulk UPDATE esg_scores (esg_b_norm, esg_l_norm, delta_esg, mu_esg)
 ```
 
-### Portfolio B — Signed Disagreement
+Why cross-sectional: ESG scores are relative signals — meaningful only compared to peers
+on the same day, not across time.
 
-```python
-# Agent 1 (Bloomberg):  R = r_t + λ · (ESG_t^(B) − ESG_t^(L))
-# Agent 2 (LESG):       R = r_t + λ · (ESG_t^(L) − ESG_t^(B))
-# Agent 3 (Financial):  R = r_t
-# Note: degenerate case when ESG_t^(B) == ESG_t^(L) → all agents get r_t only
+### Stage 3 — Time-Series Normalizer Fitting
 
-def reward_B_bloomberg(r_t, esg_B, esg_L, lam):
-    return r_t + lam * (esg_B - esg_L)
+```
+For the training window only (first 80% of dates by default):
+  For each ISIN i, for each of 8 features:
+    open, high, low, close, volume, return_pct, rsi, macd_hist
 
-def reward_B_lesg(r_t, esg_B, esg_L, lam):
-    return r_t + lam * (esg_L - esg_B)
+  min_val(i, feature) = min over training window
+  max_val(i, feature) = max over training window
+
+Stored in: training_normalizer_params — 8 × N rows per job_id
+Frozen after fit — val window and inference use these exact min/max values (no look-ahead)
 ```
 
-### Portfolio C — Full Model (Consensus + Uncertainty Penalty)
+### Stage 4 — MASAC Training (Celery Background)
 
-```python
-# Agent 1 (Bloomberg):  R = r_t + α₁·ESG_t^(B) − β·ΔESGₜ
-# Agent 2 (LESG):       R = r_t + α₂·ESG_t^(L) − β·ΔESGₜ
-# Agent 3 (Financial):  R = r_t − β·ΔESGₜ         (α₃ ≈ 0)
-# β=0 in Competitive; β>0 in Cooperative/Mixed
+```
+Celery worker receives job_id + config
+         │
+         ▼
+DatabaseMarketDataSource → SELECT market_data WHERE isin IN (...) AND date BETWEEN ...
+DatabaseESGDataSource    → SELECT esg_scores   WHERE isin IN (...) AND date BETWEEN ...
+DataNormalizer.load_from_db(job_id) → reconstructs frozen scaler from training_normalizer_params
+DataPipeline.prepare()   → drops MACD warmup rows (first macd_slow=26 rows/ISIN),
+                            applies frozen normalizer, assembles ProcessedDataset
+         │
+         ▼
+For each topology in [cooperative, competitive, mixed]:
+  TrainingOrchestrator.run()
+    ├── 10,000 warmup steps: random actions, fill ReplayBuffer (no gradient updates)
+    ├── Steps 10,000–500,000: actor inference → env.step → buffer.add → masac.update
+    ├── Every 500 steps: publish metrics to Redis PubSub (WebSocket stream)
+    ├── Every 10,000 steps: eval on 63-day val window (deterministic actions)
+    │     if Sharpe > best_sharpe → save checkpoint to model_store/{job_id}/{topology}/
+    └── Convergence: rolling std of mean entropy over 100 steps < 0.01 → stop early
+         │
+         ▼
+model_store/{job_id}/{topology}/bloomberg.pt
+model_store/{job_id}/{topology}/lesg.pt
+model_store/{job_id}/{topology}/financial.pt
 
-def reward_C(r_t, esg_portfolio, alpha, delta_esg_t, beta, topology):
-    effective_beta = beta if topology in ("cooperative", "mixed") else 0.0
-    if topology == "mixed":
-        effective_beta *= 0.5  # partial penalty
-    return r_t + alpha * esg_portfolio - effective_beta * delta_esg_t
+Each .pt: {actor, critic_1, critic_2, critic_1_target, critic_2_target, log_alpha_t} state dicts
 ```
 
 ---
 
 ## 6. Neural Network Architecture
 
-### Actor Network (per agent, 3 total)
+### Actor Network — 3 total (one per agent)
 
 ```
-Input: state_t ∈ ℝ^(10N)
-  [OHLCV(5N) | RSI(N) | MACD(N) | R_i_t(N) | ΔESG_i(N) | μESG_i(N)]
-                │
-       Linear(10N → 256) + ReLU
-                │
-       Linear(256 → 256)  + ReLU
-                │
-         ┌──────┴──────┐
-         ▼             ▼
-   Linear(256→N)  Linear(256→N)
-       μ_π             log σ²
-         │             │
-         └──────┬──────┘
-                │
-        z ~ N(μ_π, σ²)   [at training]
-        z = μ_π           [at inference]
-                │
-        (No tanh — direct to Softmax)
+Input:  state_t ∈ ℝ^(10N)
+        [open(N) | high(N) | low(N) | close(N) | volume(N) |
+         rsi(N)  | macd(N) | return(N) | ΔESG(N) | μESG(N)]
+              │
+   Linear(10N → 256) + ReLU
+              │
+   Linear(256 → 256) + ReLU
+              │
+        ┌─────┴─────┐
+        ▼           ▼
+  Linear(256→N)  Linear(256→N)
+       μ_π          log σ²
+        │           │
+        └─────┬─────┘
+              │
+  Training: z ~ N(μ_π, σ²)   [stochastic — entropy-regularised]
+  Inference: z = μ_π          [deterministic — mean output only]
+              │
+  (No tanh — direct to z_joint → Softmax)
 ```
 
-### Critic Network (twin per agent, 6 total + 6 targets)
+### Critic Network — twin per agent, 6 total + 6 target copies
 
 ```
-Input: [all_obs ∈ ℝ^(3·10N)] ++ [all_actions ∈ ℝ^(3·N)]
-       = ℝ^(33N)   [CTDE: centralized view]
-                │
-       Linear(33N → 256) + ReLU
-                │
-       Linear(256 → 256) + ReLU
-                │
-       Linear(256 → 1)
-                │
-            Q-value (scalar)
+Input:  [obs_B(10N) | obs_L(10N) | obs_F(10N)] ++ [a_B(N) | a_L(N) | a_F(N)]
+        = ℝ^(33N)   [CTDE: centralized view of all agents]
+              │
+   Linear(33N → 256) + ReLU
+              │
+   Linear(256 → 256) + ReLU
+              │
+   Linear(256 → 1) → Q-value (scalar)
 
-Twin critics: Q = min(Q₁, Q₂)  [reduces overestimation bias]
-Target nets:  θ⁻ ← τθ + (1-τ)θ⁻,  τ = 0.005
+Twin: Q = min(Q₁, Q₂)  — reduces overestimation (Clipped Double-Q)
+Target: θ⁻ ← τ·θ + (1−τ)·θ⁻,  τ = 0.005
 ```
 
 ---
 
-## 7. MASAC Training Loop
+## 7. State Vector Construction
+
+Used identically during training, validation, and inference.
+
+| Position   | Feature         | Source                    | Normalization                         |
+|------------|-----------------|---------------------------|---------------------------------------|
+| 0 … N-1    | Open            | `market_data.open`        | Time-series min-max (frozen per ISIN) |
+| N … 2N-1   | High            | `market_data.high`        | Time-series min-max (frozen per ISIN) |
+| 2N … 3N-1  | Low             | `market_data.low`         | Time-series min-max (frozen per ISIN) |
+| 3N … 4N-1  | Close           | `market_data.close`       | Time-series min-max (frozen per ISIN) |
+| 4N … 5N-1  | Volume          | `market_data.volume`      | Time-series min-max (frozen per ISIN) |
+| 5N … 6N-1  | RSI             | `market_data.rsi`         | Time-series min-max (frozen per ISIN) |
+| 6N … 7N-1  | MACD histogram  | `market_data.macd_hist`   | Time-series min-max (frozen per ISIN) |
+| 7N … 8N-1  | Return Rᵢₜ      | `market_data.return_pct`  | Time-series min-max (frozen per ISIN) |
+| 8N … 9N-1  | ΔESG            | `esg_scores.delta_esg`    | Cross-sectional (Stage 2, pre-stored) |
+| 9N … 10N-1 | μESG            | `esg_scores.mu_esg`       | Cross-sectional (Stage 2, pre-stored) |
+
+N is always dynamic — derived from whatever ISINs are in the uploaded XLSX, never hardcoded.
+
+---
+
+## 8. MASAC Training Loop
 
 ```
-Initialize:
-  - 3 Actor networks (one per agent)
-  - 6 Critic networks (twin Q per agent)
-  - 6 Target critic networks
-  - 1 ReplayBuffer (capacity=1M)
-  - 3 temperature parameters α_T (init=1.0, auto-tuned)
-  - Target entropy H̄ = −N
+Initialize per topology:
+  3 Actor networks, 6 Critic networks, 6 Target critics
+  1 shared ReplayBuffer (capacity 1,000,000)
+  3 temperature params log_alpha_t (init 1.0, auto-tuned per agent)
+  Target entropy H̄ = −N (negative n_assets)
 
-Warmup (first 10,000 steps):
-  - Random actions only, fill replay buffer
-  - Skip first 26 trading days per episode (MACD stabilisation)
+Warmup — steps 0 to 10,000:
+  Random actions → env.step → buffer.add   (no gradient updates)
 
-Per step:
-  1. Each actor computes z^(i) from local obs s_t (decentralized)
-  2. Sample from N(μ_π, σ²)  →  z^(i)_sampled
-  3. z_joint = mean([z^B, z^L, z^F])
-  4. weights = softmax(z_joint)
-  5. Environment step: (r^B, r^L, r^F, s_{t+1}) = env.step(weights)
-  6. Store (s, a^B, a^L, a^F, r^B, r^L, r^F, s') in replay buffer
-  7. Sample batch (size=256) from replay buffer
-  8. For each agent i ∈ {B, L, F}:
-       a. Critic update: minimize Bellman error on Q₁ᵢ, Q₂ᵢ
-          TD target = rᵢ + γ·(min(Q₁ᵢ_target, Q₂ᵢ_target) - α_T·log π(a'|s'))
-       b. Actor update: maximize E[min(Q₁ᵢ, Q₂ᵢ) - α_T·log π(a|s)]
-       c. Temperature update: minimize L(α_T) = E[-α_T·(log π + H̄)]
-  9. Soft-update target networks: θ⁻ ← 0.005·θ + 0.995·θ⁻
-  10. Check convergence: rolling std of mean entropy (100 steps) < 0.01
+Training — steps 10,000 to 500,000 (or convergence):
+  Per step:
+    1. actor_B.deterministic_action(obs) / sample_action(obs) → z_B  (N,)
+    2. actor_L / actor_F similarly                              → z_L, z_F
+    3. z_joint = (z_B + z_L + z_F) / 3
+    4. weights = softmax(z_joint)  → env.step(weights)
+    5. Rewards: r^B, r^L, r^F  (topology-specific β applies here)
+    6. buffer.add(obs, a_B, a_L, a_F, r_B, r_L, r_F, next_obs, done)
+    7. batch = buffer.sample(256)
+    8. For each agent i in {B, L, F}:
+         critic_loss: Bellman error on Q1ᵢ, Q2ᵢ
+           TD target = rᵢ + γ·(min(Q1ᵢ_tgt, Q2ᵢ_tgt) − α_T·log π(a'|s'))
+         actor_loss: −E[min(Q1ᵢ, Q2ᵢ) − α_T·log π(a|s)]
+         alpha_loss: −E[log_α_T·(log π(a|s) + H̄)]
+    9. Soft-update: θ⁻ ← 0.005·θ + 0.995·θ⁻
+   10. Every 500 steps: Redis PubSub publish (step, entropy, rewards, losses, alpha_t)
+   11. Every 10,000 steps: validate on 63-day held-out window
+         if val_sharpe > best_sharpe → save checkpoint → DB row in model_checkpoints
+   12. Convergence: rolling std of mean entropy (100 steps) < 0.01 → break
 
 Episode management:
-  - Episode length: 252 trading days
-  - Reset: weights → equal (1/N each)
-  - No early termination on drawdown
-  - Max: 500,000 steps total
-
-Hyperparameter search:
-  - Grid search α₁, α₂ ∈ [0.1, 1.0], β ∈ [0.1, 1.0], λ ∈ [0.1, 1.0]
-  - Validation metric: Sharpe Ratio (primary), μESG (secondary constraint)
-  - Validation window: 63 trading days (rolling out-of-sample)
+  length: 252 trading days (one year)
+  reset:  on episode end or dataset exhaustion — env.reset() returns obs at t=0
+  max:    500,000 steps total across all episodes
 ```
 
 ---
 
-## 8. API Specification
+## 9. Chat Interface (Google ADK)
 
-### REST Endpoints
+The chat endpoint is the only user-facing inference path. There is no separate `/portfolio/generate` endpoint.
 
 ```
-POST /api/v1/portfolio/generate
-Body: {
-  "assets": ["ISIN1", "ISIN2", ...],
-  "portfolio_model": "A" | "B" | "C",
-  "allocation_amount": 10000000,
-  "hyperparams": {
-    "alpha_1": 0.5, "alpha_2": 0.5, "alpha_3": 0.01,
-    "beta": 0.3, "lambda": 0.4
-  },
-  "date": "2024-01-15"
+POST /api/v1/chat
+  { "message": "I have $10M. Use Portfolio C.", "session_id": "optional-uuid" }
+          │
+          ▼
+ChatService.chat(session_id, message)
+  ├── InMemorySessionService — maintains conversation history across requests
+  │     app_name = "madrl_portfolio",  user_id = "madrl_user" (stable constant)
+  │     session_id = per-conversation UUID (client-supplied or server-generated)
+  └── Runner.run_async(RunConfig(max_llm_calls=10))
+          │
+          ▼
+  ADK LlmAgent (Gemini via cfg.adk_model)
+    Model routing (no user prompting):
+      user says "model A" → portfolio_model="A"
+      user says "model B" → portfolio_model="B"
+      anything else        → portfolio_model="C"   (default / fallback)
+          │
+          ▼
+  Tool: generate_portfolio(portfolio_model, investment_amount, max_assets=3)
+    1. InferenceService.run(model_key, investment_amount)
+         a. SELECT training_jobs WHERE portfolio_model=? AND status="completed" LIMIT 1
+         b. DataNormalizer.load_from_db(job_id) → frozen scaler
+         c. Fetch most-recent market_data + esg_scores for all N ISINs
+         d. Apply frozen normalizer → state vector (10N,)
+         e. For each topology in {cooperative, competitive, mixed}:
+              load MASAC weights from model_checkpoints (highest sharpe for this job+topology)
+              z_B = actor_bloomberg.deterministic_action(state)  → (N,)
+              z_L = actor_lesg.deterministic_action(state)       → (N,)
+              z_F = actor_financial.deterministic_action(state)  → (N,)
+              z_joint = (z_B + z_L + z_F) / 3
+              weights = softmax(z_joint)   → sums to 1.0
+              allocation = weights × investment_amount
+    2. Returns trimmed panel summaries to LLM (top max_assets per topology)
+    3. Stores full panels in service._portfolio_result (read by route after chat() returns)
+          │
+          ▼
+  LLM composes response: 3 side-by-side topology panels (holdings table + strategic summary)
+          │
+          ▼
+ChatResponse {
+  session_id, response (natural language),
+  job_id, portfolio_model,
+  panels: {
+    "C_cooperative": [...],   ← key format: "{MODEL}_{topology}"
+    "C_competitive": [...],
+    "C_mixed":       [...]
+  }
 }
+```
+
+**Key implementation notes:**
+- `OTEL_SDK_DISABLED=true` set in Python code (NOT in `.env` — Pydantic rejects it)
+- `os.environ.setdefault("GOOGLE_API_KEY", cfg.google_api_key)` — pydantic-settings does not populate `os.environ`; ADK reads it directly from `os.environ`
+- No `break` in the async generator — `GeneratorExit` through OTel context managers raises `ValueError: Token was created in a different Context` on Python 3.12+ when `break` is used
+
+---
+
+## 10. Storage Layer
+
+### PostgreSQL Schema
+
+```
+users
+  id, email (unique), username (unique), hashed_password, role ("user"|"admin"),
+  is_active, created_at, updated_at
+
+assets
+  id, isin (unique), name, sector, created_at
+
+market_data                                      ← unique (asset_id, date)
+  id, asset_id → assets.id, date
+  open, high, low, close, volume               ← raw from XLSX
+  rsi                                          ← raw from XLSX (NOT recomputed)
+  return_pct                                   ← computed: pct_change(close) per ISIN
+  macd_hist                                    ← computed: MACD(12,26,9) per ISIN
+
+esg_scores                                       ← unique (asset_id, date)
+  id, asset_id → assets.id, date
+  bloomberg_score, lesg_score                  ← raw (0-100 / 0-10)
+  esg_b_norm, esg_l_norm                       ← cross-sectional [0,1] (Stage 2)
+  delta_esg                                    ← |esg_b_norm − esg_l_norm|
+  mu_esg                                       ← (esg_b_norm + esg_l_norm) / 2
+
+training_jobs
+  id, status, portfolio_model, topology, config_json (N, dates, hyperparams)
+  current_step, best_sharpe, best_mu_esg
+  error_message, started_at, completed_at, created_at
+
+model_checkpoints                                ← unique best per (job_id, topology)
+  id, job_id → training_jobs.id, topology
+  step, path (filesystem), sharpe, mu_esg, entropy, saved_at
+
+training_normalizer_params                       ← unique (job_id, isin, feature_name)
+  id, job_id → training_jobs.id, isin
+  feature_name  ("open"|"high"|"low"|"close"|"volume"|"rsi"|"return_pct"|"macd_hist")
+  min_val, max_val
+  8 × N rows per job; N is dynamic — derived from XLSX contents
+```
+
+### Redis Usage
+
+```
+pubsub:training:{job_id}        — step metrics streamed to WS clients during training
+training:snapshot:{job_id}      — TTL 1h — last published message (for late WS subscribers)
+stop:{job_id}                   — set by POST /training/{job_id}/stop → Celery checks between topologies
+redis://localhost:6379/0        — main (session cache, snapshots)
+redis://localhost:6379/1        — Celery broker
+redis://localhost:6379/2        — Celery result backend
+```
+
+### Model Store (Filesystem)
+
+```
+model_store/{job_id}/{topology}/bloomberg.pt
+model_store/{job_id}/{topology}/lesg.pt
+model_store/{job_id}/{topology}/financial.pt
+
+Each .pt contains state dicts for:
+  actor, critic_1, critic_2, critic_1_target, critic_2_target, log_alpha_t
+```
+
+---
+
+## 11. API Reference
+
+### Auth Endpoints (public)
+
+```
+POST /api/v1/auth/register
+Body:     { "email": "...", "username": "...", "password": "..." }
+Response: UserProfile (201)
+
+POST /api/v1/auth/login
+Body:     { "email": "...", "password": "..." }
+Response: { "access_token": "...", "token_type": "bearer", "role": "user"|"admin" }
+```
+
+### Auth Endpoints (protected — Bearer token required)
+
+```
+GET  /api/v1/auth/me                → UserProfile
+PUT  /api/v1/auth/me                → UserProfile (email/username/password update)
+GET  /api/v1/auth/users             → UserListResponse  [admin only]
+PUT  /api/v1/auth/users/{id}/role   → UserProfile       [admin only]
+```
+
+### Training Endpoints
+
+```
+POST /api/v1/training/start         [admin]  multipart/form-data
+  files:            .xlsx files (sheet: Stock_ESG_Dataset)
+  portfolio_model:  A | B | C
+  topology:         cooperative | competitive | mixed | all
+  train_start/end, val_start/end:   YYYY-MM-DD (auto-split 80/20 if omitted)
+  hyperparams_json: '{"alpha_1":0.5,"alpha_2":0.5,"alpha_3":0.01,"beta":0.3,"lam":0.4}'
+Response: { "job_id": int, "status": "queued", "message": "..." }  (202)
+
+GET  /api/v1/training/{job_id}/status   [any user]
+Response: { job_id, status, step, max_steps, progress_pct, best_sharpe, best_mu_esg, ... }
+
+POST /api/v1/training/{job_id}/stop     [admin]
+Response: { "job_id": int, "stop_requested": true }
+```
+
+### Data Endpoints
+
+```
+GET  /api/v1/data/assets?sector=Technology   [any user]
+Response: { "assets": [{ "isin", "name", "sector" }], "total": N }
+
+GET  /api/v1/data/health    [public]
+Response: { "status": "ok", "database": "connected" }
+```
+
+### Chat Endpoint
+
+```
+POST /api/v1/chat   [any user]   (202)
+Body:     { "message": "I have $10M. Use Portfolio C.", "session_id": null }
 Response: {
-  "query_id": "uuid",
-  "cooperative":  { ...Panel },
-  "competitive":  { ...Panel },
-  "mixed":        { ...Panel }
-}
-
-Panel schema:
-{
-  "topology": "cooperative",
-  "portfolio": [
-    {
-      "isin": "US03783...",
-      "sector": "Tech",
-      "weight": 0.40,
-      "allocation": 4000000,
-      "return_ann": 0.22,
-      "risk_ann": 0.12,
-      "sharpe": 1.83,
-      "mu_esg": 0.93,
-      "delta_esg": 0.14
-    }, ...
-  ],
-  "aggregate_metrics": {
-    "portfolio_return": 0.19,
-    "portfolio_risk": 0.14,
-    "portfolio_sharpe": 1.36,
-    "portfolio_mu_esg": 0.72,
-    "portfolio_delta_esg": 0.30
-  },
-  "strategic_summary": "..."
-}
-
-POST /api/v1/training/start
-Body: {
+  "session_id": "uuid",
+  "response":   "...",
+  "job_id":     16,
   "portfolio_model": "C",
-  "topology": "cooperative" | "competitive" | "mixed" | "all",
-  "assets": [...],
-  "train_start": "2018-01-01",
-  "train_end": "2022-12-31",
-  "val_start": "2023-01-01",
-  "val_end": "2023-12-31",
-  "hyperparams": { ... }
+  "panels": {
+    "C_cooperative": [{ isin, company, sector, return_ann, risk, sharpe, mu_esg, delta_esg, weight, allocation }],
+    "C_competitive": [...],
+    "C_mixed":       [...]
+  }
 }
-Response: { "job_id": "uuid", "status": "queued" }
-
-GET /api/v1/training/{job_id}/status
-Response: {
-  "job_id": "uuid",
-  "status": "running" | "completed" | "failed",
-  "step": 42300,
-  "max_steps": 500000,
-  "entropy_rolling_std": 0.023,
-  "best_sharpe": 1.41,
-  "best_mu_esg": 0.68
-}
-
-GET /api/v1/portfolio/{id}/comparison
-Response: { "cooperative": Panel, "competitive": Panel, "mixed": Panel }
-
-GET /api/v1/data/assets?sector=Tech
-Response: { "assets": [{ "isin": "...", "sector": "...", "name": "..." }] }
+panels is null for conversational queries (no portfolio generated)
 ```
 
-### WebSocket Events
+### WebSocket
 
 ```
-WS /ws/training/{job_id}
+WS /ws/training/{job_id}?token=<jwt>
+  → 4001 close if token invalid
+  → snapshot delivered immediately on connect (late subscriber support)
 
-Server → Client (every step):
-{ "type": "step", "step": 1500, "entropy": 3.2, "reward_B": 0.012, "reward_L": 0.009, "reward_F": 0.015 }
-
-Server → Client (convergence):
-{ "type": "converged", "step": 234100, "final_sharpe": 1.44, "mu_esg": 0.71 }
-
-Server → Client (error):
-{ "type": "error", "message": "Training diverged: NaN loss" }
-
-WS /ws/portfolio/{session_id}
-
-Client → Server:  { "action": "update_weights", "hyperparams": { "beta": 0.6 } }
-Server → Client:  { "type": "recomputed", "cooperative": Panel, ... }
+Server messages:
+  { "type": "warmup",    "step": 500, "warmup_total": 10000, "message": "..." }
+  { "type": "step",      "step": 12000, "entropy": 3.1, "entropy_rolling_std": 0.04,
+    "reward_bloomberg": 0.012, "reward_lesg": 0.009, "reward_financial": 0.015,
+    "loss_actor": 0.23, "loss_critic": 0.41, "alpha_t": 0.87 }
+  { "type": "converged", "step": 234100, "final_sharpe": 1.44, "mu_esg": 0.71,
+    "message": "Training converged at step 234100" }
+  { "type": "error",     "message": "..." }
 ```
 
 ---
 
-## 9. Infrastructure & Deployment
+## 12. Configuration
 
-```
-docker-compose services:
-├── api          FastAPI (uvicorn, 4 workers)     port 8000
-├── worker       Celery worker (training jobs)     —
-├── beat         Celery beat (scheduled tasks)     —
-├── postgres     PostgreSQL 15                     port 5432
-├── redis        Redis 7                           port 6379
-├── flower       Celery monitoring                 port 5555
-└── prometheus   Metrics scraping                 port 9090
+All settings live in `.env` and are loaded via Pydantic Settings into `app/config.py`.
 
-Environment variables (via .env):
-POSTGRES_DSN, REDIS_URL,
-BLOOMBERG_API_KEY, LESG_API_KEY,
-MODEL_STORE_PATH,
-CELERY_BROKER_URL,
-ADK_MODEL (e.g. "gemini-2.0-flash" or "claude-sonnet-4-6"),
-GOOGLE_API_KEY / ANTHROPIC_API_KEY
-```
+| Key | Default | Purpose |
+|---|---|---|
+| `POSTGRES_DSN` | `postgresql+asyncpg://madrl:madrl@localhost:5432/madrl_portfolio` | Async PostgreSQL DSN |
+| `REDIS_URL` | `redis://localhost:6379/0` | Main Redis (cache + pub/sub) |
+| `CELERY_BROKER_URL` | `redis://localhost:6379/1` | Celery broker |
+| `CELERY_RESULT_BACKEND` | `redis://localhost:6379/2` | Celery result backend |
+| `JWT_SECRET_KEY` | *(change in production)* | HS256 signing key |
+| `JWT_ALGORITHM` | `HS256` | Token signing algorithm |
+| `JWT_EXPIRE_MINUTES` | `1440` | Token lifetime (24h) |
+| `ADK_MODEL` | `gemini-2.0-flash` | Gemini model for the chat LlmAgent |
+| `GOOGLE_API_KEY` | *(required for chat)* | Injected into `os.environ` at startup |
+| `MODEL_STORE_PATH` | `./model_store` | Filesystem root for `.pt` checkpoint files |
+| `MASAC_MAX_STEPS` | `500000` | Maximum training steps per topology |
+| `MASAC_WARMUP_STEPS` | `10000` | Random-action warmup before gradient updates |
+| `MASAC_BATCH_SIZE` | `256` | Transitions sampled per gradient update |
+| `MASAC_GAMMA` | `0.99` | Discount factor |
+| `MASAC_TAU` | `0.005` | Soft target update rate |
+| `MASAC_LR_ACTOR` | `3e-4` | Actor learning rate |
+| `MASAC_LR_CRITIC` | `3e-4` | Critic + temperature learning rate |
+| `MASAC_HIDDEN_SIZE` | `256` | Hidden layer width for all networks |
+| `MASAC_CONVERGENCE_EPSILON` | `0.01` | Entropy rolling std threshold for early stop |
+| `MASAC_CONVERGENCE_WINDOW` | `100` | Window size for convergence check |
+| `MACD_FAST` | `12` | MACD fast EMA period |
+| `MACD_SLOW` | `26` | MACD slow EMA period (also = warmup rows dropped per ISIN) |
+| `MACD_SIGNAL` | `9` | MACD signal EMA period |
+| `RSI_PERIOD` | `14` | RSI window (normalization only — RSI values come from XLSX) |
+| `VALIDATION_WINDOW_DAYS` | `63` | Val window for checkpoint selection (~1 quarter) |
+
+> `OTEL_SDK_DISABLED=true` is set in Python code at module load — do **not** put it in `.env`
+> (Pydantic rejects unknown env vars with `Extra inputs are not permitted`).
 
 ---
 
-## 10. File Structure
+## 13. Infrastructure
 
 ```
-madrl_portfolio/
-├── ARCHITECTURE.md
-├── requirements.txt
-├── Dockerfile
-├── docker-compose.yml
-├── .env.example
-├── app/
-│   ├── __init__.py
-│   ├── main.py
-│   ├── config.py
-│   ├── api/
-│   │   ├── __init__.py
-│   │   ├── deps.py
-│   │   └── routes/
-│   │       ├── __init__.py
-│   │       ├── portfolio.py
-│   │       ├── training.py
-│   │       ├── data.py
-│   │       └── websocket.py
-│   ├── agents/
-│   │   ├── __init__.py
-│   │   ├── base.py
-│   │   ├── bloomberg_agent.py
-│   │   ├── lesg_agent.py
-│   │   ├── financial_agent.py
-│   │   └── portfolio_orchestrator.py
-│   ├── rl/
-│   │   ├── __init__.py
-│   │   ├── networks.py
-│   │   ├── masac.py
-│   │   ├── replay_buffer.py
-│   │   ├── environment.py
-│   │   └── trainer.py
-│   ├── data/
-│   │   ├── __init__.py
-│   │   ├── sources/
-│   │   │   ├── __init__.py
-│   │   │   ├── market.py
-│   │   │   └── esg.py
-│   │   ├── preprocessing/
-│   │   │   ├── __init__.py
-│   │   │   ├── normalizer.py
-│   │   │   └── indicators.py
-│   │   └── pipeline.py
-│   ├── models/
-│   │   ├── __init__.py
-│   │   ├── domain.py
-│   │   └── schemas.py
-│   └── services/
-│       ├── __init__.py
-│       ├── portfolio_service.py
-│       ├── training_service.py
-│       └── inference_service.py
-└── tests/
-    ├── __init__.py
-    ├── conftest.py
-    ├── test_normalizer.py
-    ├── test_masac.py
-    ├── test_agents.py
-    └── test_api.py
+Docker Compose services:
+  api       FastAPI + uvicorn                 port 8000
+  worker    Celery worker (solo pool, Windows-compatible)
+  postgres  PostgreSQL 15                     port 5432
+  redis     Redis 7                           port 6379
+  flower    Celery monitoring UI              port 5555
+
+Alembic migration required after any domain.py change:
+  alembic revision --autogenerate -m "description"
+  alembic upgrade head
 ```

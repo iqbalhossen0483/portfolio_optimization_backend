@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import get_db, require_admin
 from app.models.domain import Asset
 from app.models.schemas import AssetsResponse, AssetInfo
 
@@ -31,7 +31,7 @@ async def list_assets(
         description="Filter by sector name (case-sensitive). Omit to return all sectors.",
         examples=["Technology"],
     ),
-    _: object = Depends(get_current_user),
+    _: object = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> AssetsResponse:
     q = select(Asset)

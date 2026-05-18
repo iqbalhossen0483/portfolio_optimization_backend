@@ -5,6 +5,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.deps import get_chat_service, get_current_user
+from app.models.domain import User
 from app.models.schemas import ChatRequest, ChatResponse, PortfolioAssetPanel
 from app.services.chat_service import ChatService
 
@@ -35,13 +36,13 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 )
 async def chat(
     request: ChatRequest,
-    _: object = Depends(get_current_user),
+    user: User = Depends(get_current_user),
     service: ChatService = Depends(get_chat_service),
 ) -> ChatResponse:
     session_id = request.session_id or str(uuid.uuid4())
 
     try:
-        result = await service.chat(session_id, request.message)
+        result = await service.chat(session_id, request.message, str(user.id))
     except Exception as exc:
         print(f"Error during chat processing: {exc}")
         raise HTTPException(status_code=503, detail=str(exc)) from exc
