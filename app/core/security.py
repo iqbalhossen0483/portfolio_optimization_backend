@@ -5,22 +5,31 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from jose import JWTError, jwt
-from passlib.context import CryptContext
+import base64
+import hashlib
+
+import bcrypt as _bcrypt
+
+from jose import jwt
 
 from app.config import get_settings
 
 cfg = get_settings()
 
-_pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def _normalize_password(password: str) -> bytes:
+    """SHA256 → base64 gives a fixed 44-byte value, safely within bcrypt's 72-byte limit."""
+    digest = hashlib.sha256(password.encode("utf-8")).digest()
+    return base64.b64encode(digest)
 
 
 def hash_password(password: str) -> str:
-    return _pwd_context.hash(password)
+    return _bcrypt.hashpw(_normalize_password(password), _bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return _pwd_context.verify(plain, hashed)
+    hashed_b = hashed.encode("utf-8") if isinstance(hashed, str) else hashed
+    return _bcrypt.checkpw(_normalize_password(plain), hashed_b)
 
 
 def create_access_token(data: dict[str, Any]) -> str:

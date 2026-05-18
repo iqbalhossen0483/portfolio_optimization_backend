@@ -32,11 +32,8 @@ if cfg.google_api_key:
 # prevent asyncio context conflicts with fastapi async context when ADK calls tools that access the database or other shared resources
 os.environ.setdefault("OTEL_SDK_DISABLED", "true") 
 
-# DatabaseSessionService requires a sync SQLAlchemy URL — strip the async driver prefix.
-_sync_dsn = cfg.postgres_dsn.replace("+asyncpg", "").replace("+aiopg", "")
 
-# Process-level singleton — preserves conversation history across requests
-_session_service = DatabaseSessionService(db_url=_sync_dsn)
+_session_service = DatabaseSessionService(db_url=cfg.postgres_dsn)
 _APP_NAME = "madrl_portfolio"
 
 _AGENT_INSTRUCTION = """
@@ -289,8 +286,9 @@ class ChatService:
     No shared mutable state across concurrent requests.
     """
 
-    def __init__(self, dsn: str) -> None:
+    def __init__(self, dsn: str, username: str = "user") -> None:
         self._dsn = dsn
+        self._username = username
         self._inference = InferenceService(dsn)
         self._portfolio_result: dict = {}
         self._runner = self._build_runner()
@@ -434,10 +432,14 @@ class ChatService:
                 await engine.dispose()
 
         agent = LlmAgent.model_validate({
-            "name":        "portfolio_advisor",
-            "model":       cfg.adk_model,
-            "instruction": _AGENT_INSTRUCTION,
-            "tools":       [generate_portfolio, list_available_models],
+            "name":  "portfolio_advisor",
+            "model": cfg.adk_model,
+            "instruction": (
+                f"The user's name is {self._username}. "
+                "Greet them by name on the first response and address them occasionally "
+                "throughout the conversation.\n\n"
+            ) + _AGENT_INSTRUCTION,
+            "tools": [generate_portfolio, list_available_models],
         })
         return Runner(
             agent=agent,

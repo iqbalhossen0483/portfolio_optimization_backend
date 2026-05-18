@@ -274,6 +274,45 @@ class ChatResponse(BaseModel):
     )
 
 
+# ── Chat Sessions ─────────────────────────────────────────────────────────────
+
+class ChatMessageInfo(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    role: str
+    content: str
+    created_at: datetime
+
+
+class ChatSessionInfo(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    session_id: str
+    name: str
+    created_at: datetime
+    updated_at: datetime
+    message_count: int
+
+
+class ChatSessionListResponse(BaseModel):
+    sessions: list[ChatSessionInfo]
+    total: int
+
+
+class ChatSessionDetail(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    session_id: str
+    name: str
+    created_at: datetime
+    updated_at: datetime
+    messages: list[ChatMessageInfo]
+
+
+class RenameChatSessionRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=128, description="New session name")
+
+
 # ── WebSocket message schemas (documented for reference) ─────────────────────
 
 class WsTrainingStep(BaseModel):

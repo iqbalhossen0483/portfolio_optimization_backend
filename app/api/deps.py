@@ -114,6 +114,8 @@ async def get_training_service(
     return TrainingService(db=db, redis_client=redis_client)
 
 
-def get_chat_service():
+async def get_chat_service(
+    user=Depends(get_current_user),
+):
     from app.services.chat_service import ChatService
-    return ChatService(dsn=cfg.postgres_dsn)
+    return ChatService(dsn=cfg.postgres_dsn, username=user.username)
