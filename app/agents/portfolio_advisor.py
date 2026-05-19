@@ -14,7 +14,7 @@ from app.config import get_settings
 from app.agents.instructions import PORTFOLIO_ADVISOR_INSTRUCTION
 from app.agents.market_intelligence import market_agent
 from app.agents.esg_research import esg_research_agent
-from app.agents.tools import make_generate_portfolio, make_list_available_models
+from app.agents.tools import make_generate_portfolio
 
 if TYPE_CHECKING:
     from app.services.chat_service import ChatService
@@ -35,7 +35,6 @@ def build_portfolio_advisor(service: "ChatService", username: str) -> LlmAgent:
         "instruction": personalized_instruction,
         "tools": [
             make_generate_portfolio(service),
-            make_list_available_models(service),
             AgentTool(agent=market_agent),
             AgentTool(agent=esg_research_agent),
         ],

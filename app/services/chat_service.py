@@ -23,7 +23,7 @@ from google.genai.types import Content, Part
 from app.config import get_settings
 from app.agents import build_portfolio_advisor
 from app.services.inference_service import InferenceService
-from app.agents.instructions import _GUARD_PROMPT
+from app.agents.instructions import GUARD_PROMPT
 
 log = structlog.get_logger(__name__)
 cfg = get_settings()
@@ -96,7 +96,7 @@ class ChatService:
         try:
             resp = await self._guard_client.aio.models.generate_content(
                 model=cfg.adk_model_guard,
-                contents=_GUARD_PROMPT.format(message=message),
+                contents=GUARD_PROMPT.format(message=message),
             )
             category = (resp.text or "").strip().lower()
             return category if category in _BLOCKED_RESPONSES else "relevant"
