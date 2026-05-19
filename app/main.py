@@ -12,7 +12,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.config import get_settings
 from app.core.database import create_tables
-from app.api.routes import training, data, websocket, chat, auth
+from app.api.routes import training, data, websocket, chat, auth, admin
 
 log = structlog.get_logger(__name__)
 cfg = get_settings()
@@ -69,6 +69,14 @@ TAGS_METADATA = [
             "- `PUT /auth/me` — update email, username, or password\n"
             "- `GET /auth/users` — *(admin)* list all users\n"
             "- `PUT /auth/users/{id}/role` — *(admin)* promote/demote a user"
+        ),
+    },
+    {
+        "name": "admin",
+        "description": (
+            "**Admin dashboard.**\n\n"
+            "- `GET /admin/dashboard` — asset, job, and user counts; training status\n"
+            "- `GET /admin/assets` — keyset-paginated asset list with market-data count"
         ),
     },
     {
@@ -167,6 +175,7 @@ def create_app() -> FastAPI:
     app.include_router(training.router,  prefix=api_prefix)
     app.include_router(data.router,      prefix=api_prefix)
     app.include_router(chat.router,      prefix=api_prefix)
+    app.include_router(admin.router,     prefix=api_prefix)
     app.include_router(websocket.router)
 
     @app.get(

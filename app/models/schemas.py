@@ -342,3 +342,28 @@ class WsError(BaseModel):
     type: str = Field(default="error")
     message: str
     details: Any = None
+
+
+# ── Admin Dashboard ───────────────────────────────────────────────────────────
+
+class DashboardMetrics(BaseModel):
+    assets_count: int
+    jobs_count: int
+    users_count: int
+    market_data_count: int
+    training_running: bool
+
+
+class AssetListItem(BaseModel):
+    id: int
+    isin: str
+    name: str
+    sector: str
+    created_at: datetime
+    market_data_count: int
+
+
+class AssetListResponse(BaseModel):
+    items: list[AssetListItem]
+    next_cursor: str | None
+    has_more: bool
