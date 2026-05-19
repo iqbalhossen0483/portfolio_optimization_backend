@@ -3,36 +3,42 @@
 ## 1. System Overview
 
 ```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                         MADRL Portfolio Platform                              │
-│                                                                               │
-│  ┌──────────┐  REST / WS   ┌──────────────────────────────────────────────┐  │
-│  │  Client  │◄────────────►│               FastAPI Gateway                 │  │
-│  │(UI / API)│              │  /auth  /training  /data  /chat  /ws         │  │
-│  └──────────┘              └────────────────┬─────────────────────────────┘  │
-│                                             │  JWT Bearer auth on all routes  │
-│                            ┌────────────────┼────────────────────┐            │
-│                            │                │                    │            │
-│                  ┌─────────▼──────┐ ┌───────▼──────┐ ┌──────────▼────────┐  │
-│                  │ TrainingService│ │  ChatService  │ │ InferenceService  │  │
-│                  │ (4-stage XLSX  │ │  (Google ADK  │ │ (loads .pt model  │  │
-│                  │  pipeline +    │ │   LlmAgent +  │ │  weights, builds  │  │
-│                  │  Celery queue) │ │   Gemini LLM) │ │  10N state vec,   │  │
-│                  └────────┬───────┘ └──────┬────────┘ │  runs actors)     │  │
-│                           │                │          └────────────────────┘  │
-│         ┌─────────────────▼────────────────▼──────────────────┐              │
-│         │                      RL Engine (MASAC)               │              │
-│         │  3 Actor networks + 6 Critics (twin Q per agent)     │              │
-│         │  Shared ReplayBuffer (1M capacity)                   │              │
-│         │  3 Topologies: cooperative / competitive / mixed      │              │
-│         └──────────────────────────┬─────────────────────────┘              │
-│                                    │                                          │
-│         ┌──────────────────────────▼─────────────────────────┐               │
-│         │                   Storage Layer                      │               │
-│         │  PostgreSQL  ←→  Redis (cache + PubSub + sessions)  │               │
-│         │  model_store/{job_id}/{topology}/*.pt               │               │
-│         └────────────────────────────────────────────────────┘               │
-└──────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────────────────┐
+│                         MADRL Portfolio Platform                                         │
+│                                                                                          │
+│  ┌──────────┐  REST/SSE/WS ┌──────────────────────────────────────────────┐              │
+│  │  Client  │◄────────────►│               FastAPI Gateway                │              │
+│  │(UI / API)│              │  /auth  /training  /data  /chat  /ws         │              │
+│  └──────────┘              └────────────────┬─────────────────────────────┘              │
+│                                             │  JWT Bearer auth on all routes             │
+│                            ┌────────────────┼────────────────────┐                       │
+│                            │                │                    │                       │
+│                  ┌─────────▼──────┐ ┌───────▼──────────────────┐ ┌──────────▼────────┐   │
+│                  │ TrainingService│ │      ChatService         │ │ InferenceService  │   │
+│                  │ (4-stage XLSX  │ │  Input Rail (Flash-Lite) │ │ (loads .pt model  │   │
+│                  │  pipeline +    │ │  ┌─────────────────────┐ │ │  weights, builds  │   │
+│                  │  Celery queue) │ │  │ portfolio_advisor   │ │ │  10N state vec,   │   │
+│                  └────────┬───────┘ │  │   (Flash)           │ │ │  runs actors)     │   │
+│                           │         │  │  ┌───────┐ ┌──────┐ │ │ │                   │   │
+│                           │         │  │  │market │ │ esg  │ │ │ │                   │   │
+│                           │         │  │  │intel. │ │resrch│ │ │ └───────────────────┘   │
+│                           │         │  │  │(Lite) │ │(Lite)│ │ │                         │
+│                           │         │  │  └───────┘ └──────┘ │ │                         │
+│                           │         │  └─────────────────────┘ │                         │
+│                           │         └──────────────────────────┘                         │
+│         ┌─────────────────▼────────────────────────────────────┐                         │
+│         │                      RL Engine (MASAC)               │                         │
+│         │  3 Actor networks + 6 Critics (twin Q per agent)     │                         │
+│         │  Shared ReplayBuffer (1M capacity)                   │                         │
+│         │  3 Topologies: cooperative / competitive / mixed     │                         │
+│         └──────────────────────────┬───────────────────────────┘                         │
+│                                    │                                                     │
+│         ┌──────────────────────────▼─────────────────────────┐                           │
+│         │                   Storage Layer                    │                           │
+│         │  PostgreSQL  ←→  Redis (cache + PubSub + sessions) │                           │
+│         │  model_store/{job_id}/{topology}/*.pt              │                           │
+│         └────────────────────────────────────────────────────┘                           │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -65,6 +71,11 @@ Role-based access:
 | POST /training/{id}/stop          | ✗    | ✓     |
 | GET  /data/assets                 | ✗    | ✓     |
 | POST /chat                        | ✓    | ✓     |
+| POST /chat/stream                 | ✓    | ✓     |
+| GET  /chat/sessions               | ✓    | ✓     |
+| GET  /chat/sessions/{id}          | ✓    | ✓     |
+| PATCH /chat/sessions/{id}         | ✓    | ✓     |
+| DELETE /chat/sessions/{id}        | ✓    | ✓     |
 | WS   /ws/training/{id}?token=...  | ✗    | ✓     |
 ```
 
@@ -86,11 +97,11 @@ Inference (chat):   cooperative + competitive + mixed    (all three, same state 
 
 **Reward function by topology and model:**
 
-| Topology    | β applied        | Portfolio A             | Portfolio B                     | Portfolio C                            |
-|-------------|------------------|-------------------------|---------------------------------|----------------------------------------|
-| Cooperative | β (full)         | rₜ + α₁·ESG_B          | rₜ + λ·(ESG_B − ESG_L)         | rₜ + α₁·ESG_B_norm − β·ΔESGₜ         |
-| Competitive | 0 (none)         | rₜ + α₁·ESG_B          | rₜ + λ·(ESG_B − ESG_L)         | rₜ + α₁·ESG_B_norm                    |
-| Mixed       | β × 0.5 (partial)| rₜ + α₁·ESG_B          | rₜ + λ·(ESG_B − ESG_L)         | rₜ + α₁·ESG_B_norm − 0.5·β·ΔESGₜ    |
+| Topology    | β applied         | Portfolio A   | Portfolio B            | Portfolio C                      |
+| ----------- | ----------------- | ------------- | ---------------------- | -------------------------------- |
+| Cooperative | β (full)          | rₜ + α₁·ESG_B | rₜ + λ·(ESG_B − ESG_L) | rₜ + α₁·ESG_B_norm − β·ΔESGₜ     |
+| Competitive | 0 (none)          | rₜ + α₁·ESG_B | rₜ + λ·(ESG_B − ESG_L) | rₜ + α₁·ESG_B_norm               |
+| Mixed       | β × 0.5 (partial) | rₜ + α₁·ESG_B | rₜ + λ·(ESG_B − ESG_L) | rₜ + α₁·ESG_B_norm − 0.5·β·ΔESGₜ |
 
 ---
 
@@ -113,19 +124,30 @@ madrl_portfolio/
 │   │       ├── auth.py      — register, login, me (GET/PUT), users (admin)
 │   │       ├── training.py  — POST /start (admin), GET /{id}/status, POST /{id}/stop (admin)
 │   │       ├── data.py      — GET /assets (any user), GET /health
-│   │       ├── chat.py      — POST /chat (any user) → ADK agent → inference panels
+│   │       ├── chat.py      — POST /chat, POST /chat/stream (SSE), session CRUD endpoints
 │   │       └── websocket.py — WS /ws/training/{job_id}?token=<jwt>
 │   ├── core/
 │   │   ├── database.py      — AsyncEngine, async_sessionmaker, create_tables()
 │   │   └── security.py      — hash_password, verify_password, create_access_token,
 │   │                           decode_token (HS256 via python-jose + passlib[bcrypt])
+│   ├── agents/
+│   │   ├── __init__.py           — exports market_agent, build_portfolio_advisor
+│   │   ├── instructions.py       — PORTFOLIO_ADVISOR_INSTRUCTION, MARKET_INTELLIGENCE_INSTRUCTION,
+│   │   │                            ESG_RESEARCH_ANALYST_INSTRUCTION (+ GUARDRAILS section)
+│   │   ├── portfolio_advisor.py  — build_portfolio_advisor() factory (per-request, captures service)
+│   │   ├── market_intelligence.py — market_agent singleton (Gemini Flash-Lite + google_search)
+│   │   ├── esg_research.py       — esg_research_agent singleton (Gemini Flash-Lite + google_search)
+│   │   └── tools/
+│   │       ├── __init__.py       — exports make_generate_portfolio, make_list_available_models
+│   │       └── portfolio_tools.py — tool closures that capture ChatService per-request state
 │   ├── models/
 │   │   ├── domain.py        — SQLAlchemy ORM: User, Asset, MarketData, ESGScore,
-│   │   │                        TrainingJob, ModelCheckpoint, TrainingNormalizerParams
+│   │   │                        TrainingJob, ModelCheckpoint, TrainingNormalizerParams,
+│   │   │                        ChatSession, ChatMessage
 │   │   └── schemas.py       — Pydantic schemas for all API request/response bodies
 │   ├── services/
 │   │   ├── training_service.py   — 4-stage ingestion pipeline; Celery dispatch
-│   │   ├── chat_service.py       — Google ADK LlmAgent; session management; tool dispatch
+│   │   ├── chat_service.py       — input rail; ADK runner; stream_chat() SSE generator
 │   │   └── inference_service.py  — loads checkpoint; builds state vector; runs actors
 │   ├── data/
 │   │   ├── sources/
@@ -293,18 +315,18 @@ Target: θ⁻ ← τ·θ + (1−τ)·θ⁻,  τ = 0.005
 
 Used identically during training, validation, and inference.
 
-| Position   | Feature         | Source                    | Normalization                         |
-|------------|-----------------|---------------------------|---------------------------------------|
-| 0 … N-1    | Open            | `market_data.open`        | Time-series min-max (frozen per ISIN) |
-| N … 2N-1   | High            | `market_data.high`        | Time-series min-max (frozen per ISIN) |
-| 2N … 3N-1  | Low             | `market_data.low`         | Time-series min-max (frozen per ISIN) |
-| 3N … 4N-1  | Close           | `market_data.close`       | Time-series min-max (frozen per ISIN) |
-| 4N … 5N-1  | Volume          | `market_data.volume`      | Time-series min-max (frozen per ISIN) |
-| 5N … 6N-1  | RSI             | `market_data.rsi`         | Time-series min-max (frozen per ISIN) |
-| 6N … 7N-1  | MACD histogram  | `market_data.macd_hist`   | Time-series min-max (frozen per ISIN) |
-| 7N … 8N-1  | Return Rᵢₜ      | `market_data.return_pct`  | Time-series min-max (frozen per ISIN) |
-| 8N … 9N-1  | ΔESG            | `esg_scores.delta_esg`    | Cross-sectional (Stage 2, pre-stored) |
-| 9N … 10N-1 | μESG            | `esg_scores.mu_esg`       | Cross-sectional (Stage 2, pre-stored) |
+| Position   | Feature        | Source                   | Normalization                         |
+| ---------- | -------------- | ------------------------ | ------------------------------------- |
+| 0 … N-1    | Open           | `market_data.open`       | Time-series min-max (frozen per ISIN) |
+| N … 2N-1   | High           | `market_data.high`       | Time-series min-max (frozen per ISIN) |
+| 2N … 3N-1  | Low            | `market_data.low`        | Time-series min-max (frozen per ISIN) |
+| 3N … 4N-1  | Close          | `market_data.close`      | Time-series min-max (frozen per ISIN) |
+| 4N … 5N-1  | Volume         | `market_data.volume`     | Time-series min-max (frozen per ISIN) |
+| 5N … 6N-1  | RSI            | `market_data.rsi`        | Time-series min-max (frozen per ISIN) |
+| 6N … 7N-1  | MACD histogram | `market_data.macd_hist`  | Time-series min-max (frozen per ISIN) |
+| 7N … 8N-1  | Return Rᵢₜ     | `market_data.return_pct` | Time-series min-max (frozen per ISIN) |
+| 8N … 9N-1  | ΔESG           | `esg_scores.delta_esg`   | Cross-sectional (Stage 2, pre-stored) |
+| 9N … 10N-1 | μESG           | `esg_scores.mu_esg`      | Cross-sectional (Stage 2, pre-stored) |
 
 N is always dynamic — derived from whatever ISINs are in the uploaded XLSX, never hardcoded.
 
@@ -352,63 +374,103 @@ Episode management:
 
 ## 9. Chat Interface (Google ADK)
 
-The chat endpoint is the only user-facing inference path. There is no separate `/portfolio/generate` endpoint.
+The chat endpoint is the only user-facing inference path. There is no separate `/portfolio/generate` endpoint. Two endpoints are available — blocking and streaming (SSE).
+
+### 9.1 Agent Architecture
+
+A **3-agent pipeline** runs on every relevant request:
+
+| Agent                 | Model                   | Role                                                               |
+| --------------------- | ----------------------- | ------------------------------------------------------------------ |
+| `portfolio_advisor`   | `gemini-2.5-flash`      | Orchestrator — parses intent, calls tools, synthesises output      |
+| `market_intelligence` | `gemini-2.5-flash-lite` | Sub-agent — live macro/sector/earnings research (Google Search)    |
+| `esg_research`        | `gemini-2.5-flash-lite` | Sub-agent — Bloomberg vs LESG ratings, controversies, ΔESG context |
+
+`portfolio_advisor` is rebuilt per-request (factory function) so tool closures can capture per-request `ChatService` state. Sub-agents are module-level singletons.
+
+### 9.2 Guardrails (Two Layers)
+
+**Layer 1 — Input Rail:** A fast Gemini Flash-Lite call classifies every message before the advisor runs:
+
+| Category       | Action                                                      |
+| -------------- | ----------------------------------------------------------- |
+| `relevant`     | Pass through to advisor                                     |
+| `off_topic`    | Canned redirect, skip advisor                               |
+| `abusive`      | Professional decline, skip advisor                          |
+| `system_probe` | "I'm not able to share configuration details", skip advisor |
+| `jailbreak`    | Canned redirect, skip advisor                               |
+
+Fails open — classification errors default to `relevant` so legitimate users are never blocked by infrastructure failures.
+
+**Layer 2 — Instruction Guardrails:** A `GUARDRAILS` section in the advisor's system prompt covers gray-area cases: subtle allocation-bypass ("just tell me what % to put in Apple"), nuanced system probing framed as financial questions, and mixed jailbreak+real requests.
+
+### 9.3 Request Flow
 
 ```
-POST /api/v1/chat
+POST /api/v1/chat  (or /chat/stream)
   { "message": "I have $10M. Use Portfolio C.", "session_id": "optional-uuid" }
           │
           ▼
-ChatService.chat(session_id, message)
-  ├── InMemorySessionService — maintains conversation history across requests
-  │     app_name = "madrl_portfolio",  user_id = "madrl_user" (stable constant)
-  │     session_id = per-conversation UUID (client-supplied or server-generated)
-  └── Runner.run_async(RunConfig(max_llm_calls=10))
+  Input Rail (Gemini Flash-Lite)
+  Blocked? → canned response returned immediately
+  Relevant? → continue
           │
           ▼
-  ADK LlmAgent (Gemini via cfg.adk_model)
+  DatabaseSessionService (PostgreSQL-backed, persists across restarts)
+  app_name = "madrl_portfolio",  user_id = str(authenticated_user.id)
+  session_id = per-conversation UUID (client-supplied or server-generated)
+          │
+          ▼
+  Runner.run_async(RunConfig(max_llm_calls=25))
+          │
+          ▼
+  portfolio_advisor (Gemini 2.5 Flash)
     Model routing (no user prompting):
-      user says "model A" → portfolio_model="A"
-      user says "model B" → portfolio_model="B"
-      anything else        → portfolio_model="C"   (default / fallback)
+      "model A" → portfolio_model="A"
+      "model B" → portfolio_model="B"
+      anything else → portfolio_model="C"
+          │
+    ├── AgentTool: market_intelligence (Gemini Flash-Lite + Google Search)
+    ├── AgentTool: esg_research (Gemini Flash-Lite + Google Search)
+    ├── Tool: generate_portfolio(portfolio_model, investment_amount, max_assets=3)
+    │         → InferenceService.run() → 3 topology panels via MASAC actors
+    └── Tool: list_available_models() (only when user explicitly asks)
           │
           ▼
-  Tool: generate_portfolio(portfolio_model, investment_amount, max_assets=3)
-    1. InferenceService.run(model_key, investment_amount)
-         a. SELECT training_jobs WHERE portfolio_model=? AND status="completed" LIMIT 1
-         b. DataNormalizer.load_from_db(job_id) → frozen scaler
-         c. Fetch most-recent market_data + esg_scores for all N ISINs
-         d. Apply frozen normalizer → state vector (10N,)
-         e. For each topology in {cooperative, competitive, mixed}:
-              load MASAC weights from model_checkpoints (highest sharpe for this job+topology)
-              z_B = actor_bloomberg.deterministic_action(state)  → (N,)
-              z_L = actor_lesg.deterministic_action(state)       → (N,)
-              z_F = actor_financial.deterministic_action(state)  → (N,)
-              z_joint = (z_B + z_L + z_F) / 3
-              weights = softmax(z_joint)   → sums to 1.0
-              allocation = weights × investment_amount
-    2. Returns trimmed panel summaries to LLM (top max_assets per topology)
-    3. Stores full panels in service._portfolio_result (read by route after chat() returns)
+  /chat   → full response returned when pipeline completes (202)
+  /stream → SSE: status events → text_chunk events → done event
           │
           ▼
-  LLM composes response: 3 side-by-side topology panels (holdings table + strategic summary)
-          │
-          ▼
-ChatResponse {
-  session_id, response (natural language),
-  job_id, portfolio_model,
-  panels: {
-    "C_cooperative": [...],   ← key format: "{MODEL}_{topology}"
-    "C_competitive": [...],
-    "C_mixed":       [...]
-  }
-}
+  Route persists user + assistant messages to chat_messages table (failure-safe)
+
+ChatResponse:
+  { session_id, response, job_id, portfolio_model,
+    panels: { "C_cooperative": [...], "C_competitive": [...], "C_mixed": [...] } }
 ```
 
+### 9.4 SSE Streaming Events (`/chat/stream`)
+
+Each line: `data: {json}\n\n`
+
+| `type`       | When                        | Key fields                                                                    |
+| ------------ | --------------------------- | ----------------------------------------------------------------------------- |
+| `status`     | Stage change                | `status` (`thinking`\|`calling_tool`), `agent`, `tool`, `label`, `content:""` |
+| `text_chunk` | Partial text from any agent | `agent`, `label`, `content`                                                   |
+| `done`       | All agents finished         | `session_id`, `response`, `portfolio_result`                                  |
+| `error`      | Unhandled exception         | `message`                                                                     |
+
+### 9.5 Session Persistence
+
+ADK conversation history → `DatabaseSessionService` (PostgreSQL).
+User-visible chat history → `chat_sessions` + `chat_messages` ORM tables (REST-queryable).
+Sessions auto-named from first message (truncated to 60 chars). Persistence failure-safe.
+
 **Key implementation notes:**
-- `OTEL_SDK_DISABLED=true` set in Python code (NOT in `.env` — Pydantic rejects it)
+
+- `OTEL_SDK_DISABLED=true` set in Python code (NOT in `.env` — Pydantic rejects unknown env vars)
 - `os.environ.setdefault("GOOGLE_API_KEY", cfg.google_api_key)` — pydantic-settings does not populate `os.environ`; ADK reads it directly from `os.environ`
-- No `break` in the async generator — `GeneratorExit` through OTel context managers raises `ValueError: Token was created in a different Context` on Python 3.12+ when `break` is used
+- No `break` in the ADK async generator — `GeneratorExit` through OTel context managers raises `ValueError: Token was created in a different Context` on Python 3.12+; generator exhausts naturally
+- `max_llm_calls=25` — accounts for multi-agent pipelines where sub-agents consume several calls internally
 
 ---
 
@@ -452,6 +514,14 @@ training_normalizer_params                       ← unique (job_id, isin, featu
   feature_name  ("open"|"high"|"low"|"close"|"volume"|"rsi"|"return_pct"|"macd_hist")
   min_val, max_val
   8 × N rows per job; N is dynamic — derived from XLSX contents
+
+chat_sessions                                    ← one row per conversation
+  id, user_id → users.id, session_id (UUID, unique), name
+  created_at, updated_at
+
+chat_messages                                    ← CASCADE delete with chat_sessions
+  id, chat_session_id → chat_sessions.id, role ("user"|"assistant"), content
+  created_at
 ```
 
 ### Redis Usage
@@ -529,7 +599,7 @@ GET  /api/v1/data/health    [public]
 Response: { "status": "ok", "database": "connected" }
 ```
 
-### Chat Endpoint
+### Chat Endpoints
 
 ```
 POST /api/v1/chat   [any user]   (202)
@@ -545,7 +615,30 @@ Response: {
     "C_mixed":       [...]
   }
 }
-panels is null for conversational queries (no portfolio generated)
+panels is null for conversational queries. Error 503 if Gemini API unavailable.
+
+POST /api/v1/chat/stream   [any user]   (200)  text/event-stream
+Body: same as /chat
+Stream: data: {json}\n\n  — event types: status | text_chunk | done | error
+  status:     { type, status, agent, tool?, label, content:"" }
+  text_chunk: { type, agent, label, content }
+  done:       { type, session_id, response, portfolio_result }
+  error:      { type, message }
+
+GET  /api/v1/chat/sessions          [any user]   (200)
+Response: { "sessions": [...], "total": N }  — ordered by last active
+
+GET  /api/v1/chat/sessions/{id}     [any user]   (200)
+Response: { id, session_id, name, created_at, updated_at, messages: [...] }
+Errors: 403 (not owner), 404 (not found)
+
+PATCH /api/v1/chat/sessions/{id}    [any user]   (200)
+Body:     { "name": "New name" }
+Response: ChatSessionInfo
+
+DELETE /api/v1/chat/sessions/{id}   [any user]   (204)
+Effect: deletes session + all messages; best-effort ADK session cleanup
+Errors: 403 (not owner), 404 (not found)
 ```
 
 ### WebSocket
@@ -571,33 +664,35 @@ Server messages:
 
 All settings live in `.env` and are loaded via Pydantic Settings into `app/config.py`.
 
-| Key | Default | Purpose |
-|---|---|---|
-| `POSTGRES_DSN` | `postgresql+asyncpg://madrl:madrl@localhost:5432/madrl_portfolio` | Async PostgreSQL DSN |
-| `REDIS_URL` | `redis://localhost:6379/0` | Main Redis (cache + pub/sub) |
-| `CELERY_BROKER_URL` | `redis://localhost:6379/1` | Celery broker |
-| `CELERY_RESULT_BACKEND` | `redis://localhost:6379/2` | Celery result backend |
-| `JWT_SECRET_KEY` | *(change in production)* | HS256 signing key |
-| `JWT_ALGORITHM` | `HS256` | Token signing algorithm |
-| `JWT_EXPIRE_MINUTES` | `1440` | Token lifetime (24h) |
-| `ADK_MODEL` | `gemini-2.0-flash` | Gemini model for the chat LlmAgent |
-| `GOOGLE_API_KEY` | *(required for chat)* | Injected into `os.environ` at startup |
-| `MODEL_STORE_PATH` | `./model_store` | Filesystem root for `.pt` checkpoint files |
-| `MASAC_MAX_STEPS` | `500000` | Maximum training steps per topology |
-| `MASAC_WARMUP_STEPS` | `10000` | Random-action warmup before gradient updates |
-| `MASAC_BATCH_SIZE` | `256` | Transitions sampled per gradient update |
-| `MASAC_GAMMA` | `0.99` | Discount factor |
-| `MASAC_TAU` | `0.005` | Soft target update rate |
-| `MASAC_LR_ACTOR` | `3e-4` | Actor learning rate |
-| `MASAC_LR_CRITIC` | `3e-4` | Critic + temperature learning rate |
-| `MASAC_HIDDEN_SIZE` | `256` | Hidden layer width for all networks |
-| `MASAC_CONVERGENCE_EPSILON` | `0.01` | Entropy rolling std threshold for early stop |
-| `MASAC_CONVERGENCE_WINDOW` | `100` | Window size for convergence check |
-| `MACD_FAST` | `12` | MACD fast EMA period |
-| `MACD_SLOW` | `26` | MACD slow EMA period (also = warmup rows dropped per ISIN) |
-| `MACD_SIGNAL` | `9` | MACD signal EMA period |
-| `RSI_PERIOD` | `14` | RSI window (normalization only — RSI values come from XLSX) |
-| `VALIDATION_WINDOW_DAYS` | `63` | Val window for checkpoint selection (~1 quarter) |
+| Key                         | Default                                                           | Purpose                                                     |
+| --------------------------- | ----------------------------------------------------------------- | ----------------------------------------------------------- |
+| `POSTGRES_DSN`              | `postgresql+asyncpg://madrl:madrl@localhost:5432/madrl_portfolio` | Async PostgreSQL DSN                                        |
+| `REDIS_URL`                 | `redis://localhost:6379/0`                                        | Main Redis (cache + pub/sub)                                |
+| `CELERY_BROKER_URL`         | `redis://localhost:6379/1`                                        | Celery broker                                               |
+| `CELERY_RESULT_BACKEND`     | `redis://localhost:6379/2`                                        | Celery result backend                                       |
+| `JWT_SECRET_KEY`            | _(change in production)_                                          | HS256 signing key                                           |
+| `JWT_ALGORITHM`             | `HS256`                                                           | Token signing algorithm                                     |
+| `JWT_EXPIRE_MINUTES`        | `1440`                                                            | Token lifetime (24h)                                        |
+| `ADK_MODEL`                 | `gemini-2.5-flash`                                                | Portfolio Advisor — orchestration & reasoning               |
+| `ADK_MODEL_MARKET`          | `gemini-2.5-flash-lite`                                           | Market Intelligence + ESG Research sub-agents               |
+| `ADK_MODEL_GUARD`           | `gemini-2.5-flash-lite`                                           | Input rail classifier — off-topic / jailbreak gate          |
+| `GOOGLE_API_KEY`            | _(required for chat)_                                             | Injected into `os.environ` at startup                       |
+| `MODEL_STORE_PATH`          | `./model_store`                                                   | Filesystem root for `.pt` checkpoint files                  |
+| `MASAC_MAX_STEPS`           | `500000`                                                          | Maximum training steps per topology                         |
+| `MASAC_WARMUP_STEPS`        | `10000`                                                           | Random-action warmup before gradient updates                |
+| `MASAC_BATCH_SIZE`          | `256`                                                             | Transitions sampled per gradient update                     |
+| `MASAC_GAMMA`               | `0.99`                                                            | Discount factor                                             |
+| `MASAC_TAU`                 | `0.005`                                                           | Soft target update rate                                     |
+| `MASAC_LR_ACTOR`            | `3e-4`                                                            | Actor learning rate                                         |
+| `MASAC_LR_CRITIC`           | `3e-4`                                                            | Critic + temperature learning rate                          |
+| `MASAC_HIDDEN_SIZE`         | `256`                                                             | Hidden layer width for all networks                         |
+| `MASAC_CONVERGENCE_EPSILON` | `0.01`                                                            | Entropy rolling std threshold for early stop                |
+| `MASAC_CONVERGENCE_WINDOW`  | `100`                                                             | Window size for convergence check                           |
+| `MACD_FAST`                 | `12`                                                              | MACD fast EMA period                                        |
+| `MACD_SLOW`                 | `26`                                                              | MACD slow EMA period (also = warmup rows dropped per ISIN)  |
+| `MACD_SIGNAL`               | `9`                                                               | MACD signal EMA period                                      |
+| `RSI_PERIOD`                | `14`                                                              | RSI window (normalization only — RSI values come from XLSX) |
+| `VALIDATION_WINDOW_DAYS`    | `63`                                                              | Val window for checkpoint selection (~1 quarter)            |
 
 > `OTEL_SDK_DISABLED=true` is set in Python code at module load — do **not** put it in `.env`
 > (Pydantic rejects unknown env vars with `Extra inputs are not permitted`).

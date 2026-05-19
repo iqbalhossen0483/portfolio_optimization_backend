@@ -4,123 +4,257 @@
 
 The chat API provides a natural language interface to the trained MASAC portfolio system. Users send queries in plain English; the system returns three side-by-side portfolio panels (Cooperative, Competitive, Mixed) with per-asset allocations, ESG metrics, and Sharpe statistics.
 
-The chat layer is powered by **Google ADK 1.33** with **Gemini** as the underlying LLM. The ADK agent parses user intent and calls structured tools that run the actual inference pipeline. Session history is maintained across multiple requests via an in-memory singleton.
+The chat layer is powered by **Google ADK** with **Gemini** as the underlying LLM. The system uses a **3-agent architecture**:
+
+| Agent | Model | Role |
+|---|---|---|
+| `portfolio_advisor` | `gemini-2.5-flash` | Orchestrator — parses intent, calls tools, synthesises all output |
+| `market_intelligence` | `gemini-2.5-flash-lite` | Sub-agent — live macro/sector/earnings research via Google Search |
+| `esg_research` | `gemini-2.5-flash-lite` | Sub-agent — Bloomberg vs LESG ESG ratings, controversies, ΔESG context |
+
+An **input rail** (Gemini Flash-Lite pre-check) runs before the advisor on every request to block off-topic, abusive, system-probing, and jailbreak messages. Session history is persisted to PostgreSQL via `DatabaseSessionService`.
+
+Two endpoints are available:
+- `POST /api/v1/chat` — blocking, returns full response when complete
+- `POST /api/v1/chat/stream` — Server-Sent Events, emits live status + text chunks as the pipeline progresses
 
 ---
 
 ## End-to-End Flow
 
 ```
-POST /api/v1/chat
-  { "message": "I have $10M. suggest me where should i invest", "session_id": "optional-uuid" }
+POST /api/v1/chat  (or /chat/stream)
+  { "message": "...", "session_id": "optional-uuid" }
          │
          ▼
-  ChatService.chat(session_id, message)
-    ├── Checks InMemorySessionService for existing session
-    ├── Creates session if new (app_name="madrl_portfolio", user_id="madrl_user")
-    └── Runs ADK Runner.run_async(RunConfig(max_llm_calls=10))
+  ┌─────────────────────────────────────────┐
+  │  INPUT RAIL (Gemini Flash-Lite)          │
+  │  Classifies message into one of:        │
+  │  relevant | off_topic | abusive |        │
+  │  system_probe | jailbreak               │
+  │                                         │
+  │  Blocked? → canned response, stop.      │
+  │  Relevant? → continue.                  │
+  └─────────────────────────────────────────┘
          │
          ▼
-  ADK LLM (Gemini) parses intent
-    ├── Identifies portfolio_model="C", investment_amount=10_000_000
-    └── Calls tool: generate_portfolio("C", 10_000_000, max_assets=3)
+  ChatService ensures ADK session exists
+  (DatabaseSessionService — persists to PostgreSQL)
          │
          ▼
-  generate_portfolio tool → InferenceService.run("C", 10_000_000)
+  ADK Runner dispatches to portfolio_advisor (Gemini 2.5 Flash)
          │
-  ┌──────┴──────────────────────────────────────────────────────────┐
-  │  Step 1: Find latest completed training job for portfolio_model  │
-  │    SELECT * FROM training_jobs                                   │
-  │    WHERE portfolio_model="C" AND status="completed"             │
-  │    ORDER BY id DESC LIMIT 1                                     │
-  │    If model A or B requested but not trained → silently fall     │
-  │    back to C and continue                                        │
-  └──────┬──────────────────────────────────────────────────────────┘
+         ├── User wants market data?
+         │     └── Calls AgentTool: market_intelligence (Gemini 2.5 Flash-Lite)
+         │           Uses Google Search + url_context to fetch live macro data
          │
-  ┌──────┴──────────────────────────────────────────────────────────┐
-  │  Step 2: Load frozen normalizer from DB                          │
-  │    SELECT isin, feature_name, min_val, max_val                   │
-  │    FROM training_normalizer_params WHERE job_id = ?              │
-  │    Reconstructs 8 × N TimeSeriesNormalizer scalers (N dynamic)   │
-  └──────┬──────────────────────────────────────────────────────────┘
+         ├── User wants ESG research?
+         │     └── Calls AgentTool: esg_research (Gemini 2.5 Flash-Lite)
+         │           Uses Google Search + url_context for Bloomberg/LESG data
          │
-  ┌──────┴──────────────────────────────────────────────────────────┐
-  │  Step 3: Build current 10N state vector                          │
-  │    a. Query most recent date in market_data for all N ISINs      │
-  │    b. Get OHLCV, RSI, macd_hist, return_pct from market_data     │
-  │    c. Get delta_esg, mu_esg from esg_scores (Stage-2 computed)   │
-  │    d. Apply frozen time-series normalizer to OHLCV+RSI+MACD+ret  │
-  │    e. Append delta_esg, mu_esg (already cross-sectional normed)  │
-  │    f. Concatenate into 10N vector:                               │
-  │       [open(N)|high(N)|low(N)|close(N)|vol(N)|                   │
-  │        rsi(N)|macd(N)|return(N)|delta_esg(N)|mu_esg(N)]         │
-  └──────┬──────────────────────────────────────────────────────────┘
-         │
-  ┌──────┴──────────────────────────────────────────────────────────┐
-  │  Step 4: Compute asset metrics from last 365 days                │
-  │    For each ISIN (last 252 usable return rows):                   │
-  │      ann_return = mean(return_pct) × 252                         │
-  │      risk (σ)  = std(return_pct) × √252                         │
-  │      sharpe    = ann_return / (risk + ε)                         │
-  │      mu_esg    = most recent (esg_b_norm + esg_l_norm) / 2       │
-  │      delta_esg = most recent |esg_b_norm − esg_l_norm|           │
-  └──────┬──────────────────────────────────────────────────────────┘
-         │
-  ┌──────┴──────────────────────────────────────────────────────────┐
-  │  Step 5: For each topology (cooperative, competitive, mixed):    │
-  │    a. Load best checkpoint from model_checkpoints table          │
-  │       (highest Sharpe for this job_id + topology)               │
-  │       Falls back to default path if no checkpoint rows yet       │
-  │    b. Instantiate MASAC(n_assets=N) and load .pt weights         │
-  │    c. Run deterministic inference:                               │
-  │         z_B = actor_bloomberg.deterministic_action(state) → (N,) │
-  │         z_L = actor_lesg.deterministic_action(state)      → (N,) │
-  │         z_F = actor_financial.deterministic_action(state) → (N,) │
-  │         z_joint = (z_B + z_L + z_F) / 3                         │
-  │         weights = softmax(z_joint) → (N,) summing to 1.0        │
-  │    d. Build panel: sort by weight desc, trim to top max_assets   │
-  │       allocation = weight × investment_amount                    │
-  └──────┬──────────────────────────────────────────────────────────┘
+         └── User wants a portfolio?
+               └── Calls tool: generate_portfolio(model, amount, max_assets)
+                     │
+                     ▼
+               InferenceService.run(model, amount)
+                 ├── Find latest completed training job for model
+                 ├── Load frozen normalizer from training_normalizer_params
+                 ├── Build 10N state vector from market_data + esg_scores
+                 ├── Compute per-asset Sharpe/μESG/ΔESG from last 252 rows
+                 └── For each topology (cooperative, competitive, mixed):
+                       Load checkpoint → run 3 actors → softmax → trim to max_assets
          │
          ▼
-  generate_portfolio stores full panels in service._portfolio_result
-  Returns JSON summary (top max_assets per topology) to ADK LLM
+  portfolio_advisor synthesises all sub-agent output + MASAC panels
+  into a single institutional-quality response
          │
          ▼
-  ADK LLM composes natural language response — 3 panels side by side
+  /chat   → ChatService.chat() returns { session_id, response, portfolio_result }
+  /stream → SSE events: status → text_chunk × N → done
          │
          ▼
-  ChatService.chat() returns:
-    { session_id, response (text), portfolio_result }
-         │
-         ▼
-  Route assembles ChatResponse:
-    {
-      "session_id": "...",
-      "response": "Here are your Portfolio C recommendations...",
-      "job_id": 16,
-      "portfolio_model": "C",
-      "panels": {
-        "C_cooperative": [...],
-        "C_competitive": [...],
-        "C_mixed":       [...]
-      }
-    }
+  Route persists user + assistant messages to chat_messages table
+  Returns ChatResponse with panels (or null for conversational queries)
 ```
 
 ---
 
-## Panel Key Format
+## Guardrails (Two Layers)
 
-Panel keys in the response follow the pattern `{MODEL}_{topology}`:
+### Layer 1 — Input Rail
 
-| Key             | Meaning                            |
-| --------------- | ---------------------------------- |
-| `C_cooperative` | Portfolio C — Cooperative topology |
-| `C_competitive` | Portfolio C — Competitive topology |
-| `C_mixed`       | Portfolio C — Mixed topology       |
+A fast **Gemini Flash-Lite** call runs before the advisor on every message. It classifies intent and short-circuits if the message is not relevant to the system's purpose:
 
-If a user somehow triggers multiple model calls in one session the key would be `A_cooperative`, etc. The `portfolio_model` field at the top level is set to `"ALL"` in that case.
+| Category | Response |
+|---|---|
+| `relevant` | Passed through to the advisor |
+| `off_topic` | "I'm a MASAC portfolio advisor… I'm not able to help with that topic." |
+| `abusive` | "I'm not able to respond to that kind of message." |
+| `system_probe` | "I'm not able to share information about my internal configuration." |
+| `jailbreak` | "I'm a MASAC portfolio advisor… How can I assist you today?" |
+
+The guard **fails open** — if the classification call itself fails (network error, quota), the message is treated as `relevant` so legitimate users are never blocked by infrastructure issues.
+
+### Layer 2 — Instruction Guardrails
+
+Explicit `GUARDRAILS` rules in the advisor's system prompt cover gray-area cases the input rail may not catch: subtle allocation-bypass attempts ("just tell me what % to put in Apple"), nuanced system probing framed as a legitimate question, and jailbreak prompts mixed with real financial questions.
+
+---
+
+## Streaming (SSE) — `/chat/stream`
+
+The streaming endpoint returns `Content-Type: text/event-stream`. Each line is `data: {json}\n\n`.
+
+### Event types
+
+| `type` | When emitted | Fields |
+|---|---|---|
+| `status` | Pipeline stage change | `status` (`thinking`\|`calling_tool`), `agent`, `tool` (on `calling_tool`), `label`, `content` (`""`) |
+| `text_chunk` | Partial text from any agent | `agent`, `label`, `content` (chunk text) |
+| `done` | After all agents finish | `session_id`, `response` (full text), `portfolio_result` |
+| `error` | Unhandled exception | `message` |
+
+### Example stream for "Allocate $10M with Portfolio C"
+
+```
+data: {"type":"status","status":"thinking","agent":"portfolio_advisor","label":"Thinking...","content":""}
+data: {"type":"status","status":"calling_tool","tool":"generate_portfolio","agent":"portfolio_advisor","label":"Calculating portfolio...","content":""}
+data: {"type":"text_chunk","agent":"portfolio_advisor","label":"Thinking...","content":"Here are your Portfolio C results"}
+data: {"type":"text_chunk","agent":"portfolio_advisor","label":"Thinking...","content":" across all three topologies:"}
+data: {"type":"done","session_id":"...","response":"<full text>","portfolio_result":{...}}
+```
+
+### Example stream for "Given current rates, allocate $5M"
+
+```
+data: {"type":"status","status":"thinking","agent":"portfolio_advisor","label":"Thinking...","content":""}
+data: {"type":"status","status":"calling_tool","tool":"market_intelligence","agent":"portfolio_advisor","label":"Fetching market intelligence...","content":""}
+data: {"type":"text_chunk","agent":"market_intelligence","label":"Fetching market intelligence...","content":"Current Fed funds rate stands at..."}
+data: {"type":"status","status":"calling_tool","tool":"generate_portfolio","agent":"portfolio_advisor","label":"Calculating portfolio...","content":""}
+data: {"type":"text_chunk","agent":"portfolio_advisor","label":"Thinking...","content":"Based on the current macro environment..."}
+data: {"type":"done","session_id":"...","response":"<full text>","portfolio_result":{...}}
+```
+
+**Frontend rendering:**
+- `text_chunk` with `agent == "portfolio_advisor"` → stream into the main response area
+- `text_chunk` with `agent == "market_intelligence"` or `"esg_research"` → collapsible "Research in progress" panel
+- `status` events → update the status indicator with `label`
+- `done` → replace streamed text with the authoritative `response`, attach portfolio panels
+
+Consume with `fetch` + `ReadableStream` (not native `EventSource`) so the `Authorization: Bearer` header can be sent.
+
+---
+
+## Agent Architecture
+
+### Portfolio Advisor (orchestrator)
+
+Built per-request so tool closures can capture per-request `ChatService` state. Sub-agents are module-level singletons.
+
+```python
+# app/agents/portfolio_advisor.py
+def build_portfolio_advisor(service: ChatService, username: str) -> LlmAgent:
+    return LlmAgent(
+        name="portfolio_advisor",
+        model=cfg.adk_model,            # gemini-2.5-flash
+        instruction=PORTFOLIO_ADVISOR_INSTRUCTION + GUARDRAILS,
+        tools=[
+            make_generate_portfolio(service),   # closure — captures service instance
+            make_list_available_models(service), # closure — captures service instance
+            AgentTool(agent=market_agent),       # delegates to market_intelligence sub-agent
+            AgentTool(agent=esg_research_agent), # delegates to esg_research sub-agent
+        ],
+    )
+```
+
+### Market Intelligence (sub-agent singleton)
+
+```python
+# app/agents/market_intelligence.py
+market_agent = LlmAgent(
+    name="market_intelligence",
+    model=cfg.adk_model_market,        # gemini-2.5-flash-lite
+    instruction=MARKET_INTELLIGENCE_INSTRUCTION,
+    tools=[google_search, url_context],
+)
+```
+
+Scope: macro environment, interest rates, inflation, equity sector performance, earnings, geopolitical risks. ESG topics are explicitly out of scope — redirected to the ESG agent.
+
+### ESG Research (sub-agent singleton)
+
+```python
+# app/agents/esg_research.py
+esg_research_agent = LlmAgent(
+    name="esg_research",
+    model=cfg.adk_model_market,        # gemini-2.5-flash-lite
+    instruction=ESG_RESEARCH_ANALYST_INSTRUCTION,
+    tools=[google_search, url_context],
+)
+```
+
+Scope: Bloomberg ESG vs LESG ESG ratings, score divergence (ΔESG), controversies, regulatory changes. Macro/market topics are explicitly out of scope — redirected to the market agent.
+
+---
+
+## Tools
+
+### `generate_portfolio(portfolio_model, investment_amount, max_assets=3)`
+
+Runs the full MASAC inference pipeline. Returns a compact JSON summary for the LLM to narrate. Also writes full trimmed panels into `service._portfolio_result` which the route reads after `chat()` returns.
+
+- `portfolio_model`: `"A"`, `"B"`, or `"C"` — coerced to uppercase; invalid values → `"C"`
+- `investment_amount`: total USD (e.g. `10000000.0`)
+- `max_assets`: top N assets per topology panel (default 3, max 7)
+
+**Fallback logic**: if the requested model has no completed training job, the tool silently retries with `"C"`. The LLM is not told unless it asks.
+
+### `list_available_models()`
+
+Queries `training_jobs WHERE status = "completed"` and returns job IDs, portfolio models, topologies, and best Sharpe scores. Called **only** when the user explicitly asks about training status — never before `generate_portfolio`.
+
+### `market_intelligence` (AgentTool)
+
+Delegates to the Market Intelligence sub-agent. Triggered when the user asks about macro, rates, sector, earnings, or geopolitical context. The sub-agent runs Google Search autonomously and returns a structured research summary.
+
+### `esg_research` (AgentTool)
+
+Delegates to the ESG Research sub-agent. Triggered when the user asks about Bloomberg/LESG score changes, ESG controversies, ΔESG drivers, or sustainability regulations. Returns a structured ESG intelligence report.
+
+### Model routing rules (enforced by advisor instruction)
+
+| User says | Model used |
+|---|---|
+| "model A" / "portfolio A" | `"A"` |
+| "model B" / "portfolio B" | `"B"` |
+| Anything else (including "best", "recommended", "default", unspecified) | `"C"` |
+
+The advisor **never asks** which model to use and never explains routing logic unless asked.
+
+---
+
+## Session Management
+
+### ADK sessions (conversation history)
+
+Session history is maintained via `DatabaseSessionService` backed by the same PostgreSQL database. Sessions persist across server restarts and are scoped to `app_name="madrl_portfolio"` + `user_id` (the authenticated user's DB integer ID as a string).
+
+```python
+_session_service = DatabaseSessionService(db_url=cfg.postgres_dsn)
+```
+
+### Chat sessions (message history)
+
+The route layer additionally persists messages to `chat_sessions` and `chat_messages` tables so users can retrieve history via the REST API.
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/v1/chat/sessions` | List all sessions for the authenticated user, ordered by last active |
+| `GET /api/v1/chat/sessions/{session_id}` | Full session with message history |
+| `PATCH /api/v1/chat/sessions/{session_id}` | Rename a session |
+| `DELETE /api/v1/chat/sessions/{session_id}` | Delete session + all messages (also cleans up ADK session) |
+
+Sessions are auto-named from the first message (truncated to 60 chars). DB persistence is failure-safe — persistence errors are logged but never break the chat response.
 
 ---
 
@@ -174,18 +308,6 @@ All three topologies receive the **same** 10N state vector. Differences emerge e
 
 ---
 
-## Asset Count: max_assets
-
-The `generate_portfolio` tool accepts a `max_assets: int = 3` parameter. The ADK agent sets this dynamically:
-
-- **Default**: 3 (concentrated portfolio)
-- **User-specified**: if the user says "top 5" or "7 assets", that number is used
-- **Agent discretion**: the agent may increase beyond 3 (up to 5) when multiple assets show strong Sharpe and meaningful weight — but never exceeds 7 without an explicit user request
-
-Internally, the full N-asset panel is computed and sorted by weight descending. Only the top `max_assets` rows are returned to the LLM for narration and stored in `panels`. The full panel is never exposed in the API response.
-
----
-
 ## Panel Output Per Asset
 
 Each topology panel is a list sorted by weight descending:
@@ -217,91 +339,16 @@ Each topology panel is a list sorted by weight descending:
 
 ---
 
-## Google ADK Agent
-
-### Identity & session
-
-```python
-_APP_NAME  = "madrl_portfolio"
-_USER_ID   = "madrl_user"          # stable app-level identifier — NOT the session UUID
-_session_service = InMemorySessionService()  # process-level singleton
-```
-
-`session_id` is the per-conversation UUID (client-supplied or server-generated). `user_id` is a fixed app constant. Both must match exactly between `create_session` and `run_async`.
-
-### Tools
-
-#### `generate_portfolio(portfolio_model, investment_amount, max_assets=3)`
-
-Runs the full inference pipeline. Returns a compact JSON summary (top holdings per topology) for the LLM to narrate. Also writes the full trimmed panels into `service._portfolio_result` which the route reads after `chat()` returns.
-
-- `portfolio_model`: `"A"`, `"B"`, or `"C"` — coerced to uppercase; invalid values → `"C"`
-- `investment_amount`: total USD (e.g. `10000000.0`)
-- `max_assets`: how many top assets to return per topology panel (default 3)
-
-**Fallback logic**: if the requested model has no completed training job, the tool silently retries with `"C"` and logs a warning. The LLM is never told about the fallback unless it asks.
-
-#### `list_available_models()`
-
-Queries `training_jobs WHERE status = "completed"` and returns job IDs, portfolio models, topologies, and best Sharpe scores. Called **only** when the user explicitly asks about training status or model availability — never before `generate_portfolio`.
-
-### Model routing rules (enforced by agent instruction)
-
-| User says                                                                       | Model used |
-| ------------------------------------------------------------------------------- | ---------- |
-| "model A" / "portfolio A"                                                       | `"A"`      |
-| "model B" / "portfolio B"                                                       | `"B"`      |
-| Anything else (including "best", "recommended", "full", "default", unspecified) | `"C"`      |
-
-The agent **never asks** which model to use. It never explains the fallback logic unless directly asked.
-
-### RunConfig
-
-```python
-run_config = RunConfig(max_llm_calls=10)
-```
-
-Hard cap of 10 LLM calls per request. Prevents the infinite tool-call loop that occurs when `gemini-2.5-flash-lite` returns mixed text+function_call parts — the ADK warning `"there are non-text parts in the response: ['function_call']"` is a known model quirk, capped here.
-
-### Async generator — no break
-
-```python
-async for event in self._runner.run_async(...):
-    if event.is_final_response() and event.content and event.content.parts:
-        final_text = "".join(p.text for p in event.content.parts if hasattr(p, "text") and p.text)
-# No break — generator exhausts naturally
-```
-
-`break` inside an async generator causes `GeneratorExit` to propagate through OpenTelemetry context managers, raising `ValueError: Token was created in a different Context` on Python 3.12+. The generator is allowed to exhaust naturally to avoid this. OTel is also disabled at module level: `os.environ.setdefault("OTEL_SDK_DISABLED", "true")`.
-
-### Google API key injection
-
-Pydantic-settings reads `.env` into the `Settings` object but does **not** populate `os.environ`. Google ADK reads `GOOGLE_API_KEY` directly from `os.environ`. The service sets it explicitly at module load:
-
-```python
-if cfg.google_api_key:
-    os.environ.setdefault("GOOGLE_API_KEY", cfg.google_api_key)
-```
-
----
-
 ## API Reference
 
 ### `POST /api/v1/chat`
 
 **Request:**
-
 ```json
-{
-  "message": "I have $10,000,000 to allocate. Use Portfolio C.",
-  "session_id": "optional-existing-uuid"
-}
+{ "message": "I have $10,000,000 to allocate. Use Portfolio C.", "session_id": "optional-uuid" }
 ```
 
-- `session_id`: omit on first message — the server generates and returns one. Include on all follow-up messages to continue the same conversation.
-
-**Response:**
-
+**Response (202):**
 ```json
 {
   "session_id": "3f7a2b1c-...",
@@ -309,17 +356,35 @@ if cfg.google_api_key:
   "job_id": 16,
   "portfolio_model": "C",
   "panels": {
-    "C_cooperative": [ { "isin": "...", "weight": 0.40, "allocation": 4000000.0, ... } ],
+    "C_cooperative": [ { "isin": "...", "weight": 0.40, "allocation": 4000000.0 } ],
     "C_competitive": [ ... ],
     "C_mixed":       [ ... ]
   }
 }
 ```
 
-- `panels` is `null` for purely conversational queries (no portfolio generated)
-- `response` always contains the LLM's natural language reply
-- Status code: `202 Accepted`
-- Error: `503` if the Gemini API or ADK is unavailable
+`panels` is `null` for purely conversational queries. Error: `503` if Gemini API is unavailable.
+
+---
+
+### `POST /api/v1/chat/stream`
+
+**Request:** same as `/chat`.
+
+**Response:** `text/event-stream` — see [Streaming section](#streaming-sse----chatstream) above.
+
+---
+
+### Session endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/chat/sessions` | List all sessions, ordered by last active |
+| `GET` | `/api/v1/chat/sessions/{session_id}` | Session metadata + full message history |
+| `PATCH` | `/api/v1/chat/sessions/{session_id}` | Rename a session |
+| `DELETE` | `/api/v1/chat/sessions/{session_id}` | Delete session + all messages |
+
+All session endpoints require authentication and enforce ownership (403 if session belongs to another user).
 
 ---
 
@@ -338,10 +403,48 @@ If no completed job exists for the requested model, the agent falls back to mode
 
 ## Configuration
 
-| Setting            | .env key           | Default                 | Purpose                                                               |
-| ------------------ | ------------------ | ----------------------- | --------------------------------------------------------------------- |
-| `adk_model`        | `ADK_MODEL`        | `gemini-2.5-flash-lite` | Gemini model used by the ADK agent                                    |
-| `google_api_key`   | `GOOGLE_API_KEY`   | _(required)_            | Google API key — set in `.env`, injected into `os.environ` at startup |
-| `model_store_path` | `MODEL_STORE_PATH` | `./model_store`         | Filesystem root for `.pt` checkpoint files                            |
+| Setting | .env key | Default | Purpose |
+|---|---|---|---|
+| `adk_model` | `ADK_MODEL` | `gemini-2.5-flash` | Portfolio Advisor — orchestration & reasoning |
+| `adk_model_market` | `ADK_MODEL_MARKET` | `gemini-2.5-flash-lite` | Market Intelligence + ESG Research sub-agents |
+| `adk_model_guard` | `ADK_MODEL_GUARD` | `gemini-2.5-flash-lite` | Input rail classifier — off-topic/abuse/jailbreak gate |
+| `google_api_key` | `GOOGLE_API_KEY` | _(required)_ | Google API key — injected into `os.environ` at startup |
+| `model_store_path` | `MODEL_STORE_PATH` | `./model_store` | Filesystem root for `.pt` checkpoint files |
 
 > `OTEL_SDK_DISABLED=true` is set in Python code at module load — do **not** add it to `.env` as it causes a Pydantic validation error (`Extra inputs are not permitted`).
+
+---
+
+## Implementation Notes
+
+### Google API key injection
+
+Pydantic-settings reads `.env` into the `Settings` object but does **not** populate `os.environ`. Google ADK reads `GOOGLE_API_KEY` directly from `os.environ`. The service sets it explicitly at module load:
+
+```python
+if cfg.google_api_key:
+    os.environ.setdefault("GOOGLE_API_KEY", cfg.google_api_key)
+```
+
+### Async generator — no break
+
+```python
+async for event in self._runner.run_async(...):
+    if event.is_final_response() and event.content and event.content.parts:
+        final_text = "".join(p.text for p in event.content.parts if hasattr(p, "text") and p.text)
+# No break — generator exhausts naturally
+```
+
+`break` inside an async generator causes `GeneratorExit` to propagate through OpenTelemetry context managers, raising `ValueError: Token was created in a different Context` on Python 3.12+. The generator is allowed to exhaust naturally. OTel is also disabled at module level: `os.environ.setdefault("OTEL_SDK_DISABLED", "true")`.
+
+### RunConfig
+
+```python
+run_config = RunConfig(max_llm_calls=25)
+```
+
+Hard cap of 25 LLM calls per request — accounts for multi-agent pipelines where market_intelligence and esg_research each consume several calls internally.
+
+### MASAC allocation constraint
+
+**All portfolio weights come exclusively from the MASAC reinforcement learning engine.** The LLM agents are narrators and researchers — they are explicitly forbidden from predicting, suggesting, or adjusting any allocation weight. The advisor instruction contains a hard `SYSTEM IDENTITY` section reinforcing this boundary, and the guardrails catch allocation-bypass attempts.
